@@ -1,0 +1,48 @@
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "SWUINeovimWorkspace",
+    platforms: [
+        .macOS(.v14),
+        .iOS(.v17),
+    ],
+    products: [
+        .library(name: "SWUINeovim", targets: ["SWUINeovim"]),
+        .executable(name: "SWUINeovimMac", targets: ["SWUINeovimMac"]),
+    ],
+    dependencies: [
+        .package(path: "Packages/MsgPack"),
+        .package(path: "Packages/NvimRPC"),
+    ],
+    targets: [
+        .target(
+            name: "SWUINeovim",
+            dependencies: [
+                .product(name: "MsgPack", package: "MsgPack"),
+                .product(name: "NvimRPC", package: "NvimRPC"),
+            ],
+            path: "SWUINeovim",
+            exclude: [
+                "App",
+                "Resources",
+                "Rendering/Shaders",
+                "Views/EditorView.swift",
+                "Views/EditorSurface.swift",
+            ]
+        ),
+        .testTarget(
+            name: "SWUINeovimTests",
+            dependencies: ["SWUINeovim"],
+            path: "SWUINeovimTests"
+        ),
+        .executableTarget(
+            name: "SWUINeovimMac",
+            dependencies: [
+                .product(name: "MsgPack", package: "MsgPack"),
+                .product(name: "NvimRPC", package: "NvimRPC"),
+            ],
+            path: "Sources/SWUINeovimMac"
+        ),
+    ]
+)

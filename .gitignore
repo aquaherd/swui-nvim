@@ -1,0 +1,19 @@
+# SwiftPM build artifacts
+.build/
+**/.build/
+.swiftpm/
+
+# Xcode user-local files
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserdatad/
+*.xcuserstate
+
+# VS Code local state (keep shared settings/tasks/launch in repo)
+.vscode/*.log
+
+# macOS Finder / editor junk
+.DS_Store
+*.swp
+*.swo

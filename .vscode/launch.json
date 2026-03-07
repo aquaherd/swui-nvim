@@ -1,0 +1,44 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+        "name": "Debug SWUINeovimMac App",
+        "type": "lldb",
+        "request": "launch",
+        "program": "${workspaceFolder}/.build/arm64-apple-macosx/debug/SWUINeovimMac.app/Contents/MacOS/SWUINeovimMac",
+        "args": [],
+        "cwd": "${workspaceFolder}",
+        "preLaunchTask": "Swift: Stage SWUINeovimMac App Bundle"
+    },
+    {
+        "name": "Debug NvimRPC Tests",
+        "type": "lldb",
+        "request": "launch",
+        "program": "${workspaceFolder}/Packages/NvimRPC/.build/arm64-apple-macosx/debug/NvimRPCPackageTests.xctest/Contents/MacOS/NvimRPCPackageTests",
+        "args": [],
+        "cwd": "${workspaceFolder}/Packages/NvimRPC",
+        "preLaunchTask": "Swift: Build NvimRPC Tests"
+    },
+    {
+        "name": "Debug MsgPack Tests",
+        "type": "lldb",
+        "request": "launch",
+        "program": "${workspaceFolder}/Packages/MsgPack/.build/arm64-apple-macosx/debug/MsgPackPackageTests.xctest/Contents/MacOS/MsgPackPackageTests",
+        "args": [],
+        "cwd": "${workspaceFolder}/Packages/MsgPack",
+        "preLaunchTask": "Swift: Build MsgPack Tests"
+    },
+    {
+        "name": "Debug Single NvimRPC Test (edit args)",
+        "type": "lldb",
+        "request": "launch",
+        "program": "${workspaceFolder}/Packages/NvimRPC/.build/arm64-apple-macosx/debug/NvimRPCPackageTests.xctest/Contents/MacOS/NvimRPCPackageTests",
+        "args": [
+            "-XCTest",
+            "RPCChannelTests/testOutOfOrderResponsesMatchedByMsgid"
+        ],
+        "cwd": "${workspaceFolder}/Packages/NvimRPC",
+        "preLaunchTask": "Swift: Build NvimRPC Tests"
+    }
+]
+}

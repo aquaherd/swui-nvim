@@ -1,0 +1,112 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Swift: Build Workspace",
+      "type": "shell",
+      "command": "swift",
+      "args": ["build", "--product", "SWUINeovimMac"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Run SWUINeovimMac",
+      "type": "shell",
+      "command": "swift",
+      "args": ["run", "SWUINeovimMac"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Stage SWUINeovimMac App Bundle",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/stage_swuineovimmac_app.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Test Workspace",
+      "type": "shell",
+      "command": "swift",
+      "args": ["test"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Build MsgPack",
+      "type": "shell",
+      "command": "swift",
+      "args": ["build"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/MsgPack"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Test MsgPack",
+      "type": "shell",
+      "command": "swift",
+      "args": ["test"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/MsgPack"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Build NvimRPC",
+      "type": "shell",
+      "command": "swift",
+      "args": ["build"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/NvimRPC"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Build NvimRPC Tests",
+      "type": "shell",
+      "command": "swift",
+      "args": ["build", "--build-tests"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/NvimRPC"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Test NvimRPC",
+      "type": "shell",
+      "command": "swift",
+      "args": ["test"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/NvimRPC"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift: Build MsgPack Tests",
+      "type": "shell",
+      "command": "swift",
+      "args": ["build", "--build-tests"],
+      "options": {
+        "cwd": "${workspaceFolder}/Packages/MsgPack"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
