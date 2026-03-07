@@ -312,7 +312,7 @@ public final class CoreTextRenderer: @unchecked Sendable {
             in: context
         )
 
-        // 2. Draw text runs
+        // 2. Draw text runs (skipping box-drawing characters)
         drawTextRuns(
             row: row,
             rowY: rowY,
@@ -321,7 +321,16 @@ public final class CoreTextRenderer: @unchecked Sendable {
             in: context
         )
 
-        // 3. Draw decorations (underline, strikethrough, undercurl, etc.)
+        // 3. Owner-draw box-drawing / line-drawing characters as CGContext paths
+        drawBoxDrawingCells(
+            row: row,
+            rowY: rowY,
+            highlights: highlights,
+            defaultAttrs: defaultAttrs,
+            in: context
+        )
+
+        // 4. Draw decorations (underline, strikethrough, undercurl, etc.)
         drawDecorations(
             row: row,
             rowY: rowY,
@@ -428,6 +437,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
                 continue
             }
 
+            // Replace box-drawing characters with a space so they are
+            // owner-drawn in a separate pass while keeping CTLine positioning.
+            let ch = BoxDrawingLookup.info(for: cell.character) != nil ? " " : cell.character
+
             if cell.highlightID != currentHL {
                 // Commit the current run
                 if !currentText.isEmpty {
@@ -438,12 +451,12 @@ public final class CoreTextRenderer: @unchecked Sendable {
                         highlightID: currentHL
                     ))
                 }
-                currentText = cell.character
+                currentText = ch
                 startCol = i
                 currentHL = cell.highlightID
                 colCount = 1
             } else {
-                currentText += cell.character
+                currentText += ch
                 colCount += 1
             }
         }
@@ -616,6 +629,192 @@ public final class CoreTextRenderer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Box-Drawing / Line-Drawing Owner Draw
+
+    /// Owner-draw any box-drawing characters in the row using CGContext paths.
+    /// This is called after text runs so backgrounds are already filled.
+    /// CoreGraphics uses bottom-left origin so `rowY` is the bottom of the row.
+    private func drawBoxDrawingCells(
+        row: [GridCell],
+        rowY: CGFloat,
+        highlights: [Int: HighlightAttributes],
+        defaultAttrs: HighlightAttributes,
+        in context: CGContext
+    ) {
+        let lightWidth: CGFloat = 1.0
+        let heavyWidth: CGFloat = 2.0
+
+        for (colIndex, cell) in row.enumerated() {
+            guard let info = BoxDrawingLookup.info(for: cell.character) else { continue }
+
+            let attrs = highlights[cell.highlightID] ?? defaultAttrs
+            let fgColor = attrs.effectiveForeground
+
+            let cellRect = CGRect(
+                x: CGFloat(colIndex) * cellWidth,
+                y: rowY,
+                width: cellWidth,
+                height: cellHeight
+            )
+            let cx = cellRect.midX
+            let cy = cellRect.midY
+
+            context.saveGState()
+            context.setStrokeColor(fgColor.cgColor)
+            context.setLineCap(.square)
+            context.setLineJoin(.miter)
+
+            let w = info.heavy ? heavyWidth : lightWidth
+            context.setLineWidth(w)
+
+            if info.rounded {
+                drawRoundedCorner(info: info, in: context, cellRect: cellRect, cx: cx, cy: cy)
+            } else if info.dashed {
+                let dashLen = cellWidth * 0.2
+                context.setLineDash(phase: 0, lengths: [dashLen, dashLen])
+                drawStraightSegments(info: info, in: context, cellRect: cellRect, cx: cx, cy: cy)
+                context.setLineDash(phase: 0, lengths: [])
+            } else if info.double {
+                let offset: CGFloat = 2.0
+                context.setLineWidth(lightWidth)
+                if info.left || info.right {
+                    if info.left {
+                        context.move(to: CGPoint(x: cellRect.minX, y: cy - offset))
+                        context.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy - offset))
+                        context.strokePath()
+                        context.move(to: CGPoint(x: cellRect.minX, y: cy + offset))
+                        context.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy + offset))
+                        context.strokePath()
+                    }
+                    if info.right && !info.left {
+                        context.move(to: CGPoint(x: cx, y: cy - offset))
+                        context.addLine(to: CGPoint(x: cellRect.maxX, y: cy - offset))
+                        context.strokePath()
+                        context.move(to: CGPoint(x: cx, y: cy + offset))
+                        context.addLine(to: CGPoint(x: cellRect.maxX, y: cy + offset))
+                        context.strokePath()
+                    }
+                }
+                if info.up || info.down {
+                    // Non-flipped CG: up = maxY, down = minY
+                    if info.up {
+                        context.move(to: CGPoint(x: cx - offset, y: info.down ? cellRect.minY : cy))
+                        context.addLine(to: CGPoint(x: cx - offset, y: cellRect.maxY))
+                        context.strokePath()
+                        context.move(to: CGPoint(x: cx + offset, y: info.down ? cellRect.minY : cy))
+                        context.addLine(to: CGPoint(x: cx + offset, y: cellRect.maxY))
+                        context.strokePath()
+                    }
+                    if info.down && !info.up {
+                        context.move(to: CGPoint(x: cx - offset, y: cy))
+                        context.addLine(to: CGPoint(x: cx - offset, y: cellRect.minY))
+                        context.strokePath()
+                        context.move(to: CGPoint(x: cx + offset, y: cy))
+                        context.addLine(to: CGPoint(x: cx + offset, y: cellRect.minY))
+                        context.strokePath()
+                    }
+                }
+            } else {
+                drawStraightSegments(info: info, in: context, cellRect: cellRect, cx: cx, cy: cy)
+            }
+
+            context.restoreGState()
+        }
+    }
+
+    private func drawStraightSegments(
+        info: BoxDrawingLookup.Info,
+        in context: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat
+    ) {
+        // CoreGraphics non-flipped: Y increases upward.
+        // Grid "up" (smaller row index) = higher Y = maxY.
+        // Grid "down" (larger row index) = lower Y = minY.
+        if info.left {
+            context.move(to: CGPoint(x: cellRect.minX, y: cy))
+            context.addLine(to: CGPoint(x: cx, y: cy))
+            context.strokePath()
+        }
+        if info.right {
+            context.move(to: CGPoint(x: cx, y: cy))
+            context.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.strokePath()
+        }
+        if info.up {
+            context.move(to: CGPoint(x: cx, y: cy))
+            context.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.strokePath()
+        }
+        if info.down {
+            context.move(to: CGPoint(x: cx, y: cellRect.minY))
+            context.addLine(to: CGPoint(x: cx, y: cy))
+            context.strokePath()
+        }
+    }
+
+    /// Draw a rounded corner arc connecting two segments.
+    /// The radius is capped at the smaller of half-cell-width and half-cell-height.
+    /// Uses non-flipped CG coordinates: Y increases upward, so grid "down" = minY.
+    private func drawRoundedCorner(
+        info: BoxDrawingLookup.Info,
+        in context: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat
+    ) {
+        let halfW = cellRect.width / 2
+        let halfH = cellRect.height / 2
+        let radius = min(halfW, halfH)
+
+        if info.right && info.down {
+            // ╭ — grid down (minY) sweeping to grid right (maxX)
+            context.move(to: CGPoint(x: cx, y: cellRect.minY))
+            context.addLine(to: CGPoint(x: cx, y: cy - radius))
+            context.addArc(center: CGPoint(x: cx + radius, y: cy - radius),
+                           radius: radius,
+                           startAngle: .pi,
+                           endAngle: .pi * 0.5,
+                           clockwise: true)
+            context.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.strokePath()
+        } else if info.left && info.down {
+            // ╮ — grid left (minX) sweeping to grid down (minY)
+            context.move(to: CGPoint(x: cellRect.minX, y: cy))
+            context.addLine(to: CGPoint(x: cx - radius, y: cy))
+            context.addArc(center: CGPoint(x: cx - radius, y: cy - radius),
+                           radius: radius,
+                           startAngle: .pi * 0.5,
+                           endAngle: 0,
+                           clockwise: true)
+            context.addLine(to: CGPoint(x: cx, y: cellRect.minY))
+            context.strokePath()
+        } else if info.left && info.up {
+            // ╯ — grid up (maxY) sweeping to grid left (minX)
+            context.move(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.addLine(to: CGPoint(x: cx, y: cy + radius))
+            context.addArc(center: CGPoint(x: cx - radius, y: cy + radius),
+                           radius: radius,
+                           startAngle: 0,
+                           endAngle: .pi * 1.5,
+                           clockwise: true)
+            context.addLine(to: CGPoint(x: cellRect.minX, y: cy))
+            context.strokePath()
+        } else if info.right && info.up {
+            // ╰ — grid right (maxX) sweeping to grid up (maxY)
+            context.move(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.addLine(to: CGPoint(x: cx + radius, y: cy))
+            context.addArc(center: CGPoint(x: cx + radius, y: cy + radius),
+                           radius: radius,
+                           startAngle: .pi * 1.5,
+                           endAngle: .pi,
+                           clockwise: true)
+            context.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.strokePath()
+        }
+    }
+
     // MARK: - Font Resolution
 
     private func resolveFont(for attrs: HighlightAttributes) -> PlatformFont {
@@ -705,4 +904,187 @@ public enum CursorStyle: Sendable, Equatable, Hashable {
     case beam
     /// A thin horizontal bar at the bottom of the cell.
     case underline
+}
+
+// MARK: - Box-Drawing Character Lookup
+
+/// Maps Unicode box-drawing characters (U+2500–U+257F) and rounded-corner
+/// characters (U+256D–U+2570) to their segment connectivity so the grid
+/// renderer can owner-draw them as CGContext paths instead of font glyphs.
+enum BoxDrawingLookup {
+
+    struct Info {
+        let left: Bool
+        let right: Bool
+        let up: Bool
+        let down: Bool
+        let rounded: Bool
+        let heavy: Bool
+        let double: Bool
+        let dashed: Bool
+
+        init(
+            left: Bool = false,
+            right: Bool = false,
+            up: Bool = false,
+            down: Bool = false,
+            rounded: Bool = false,
+            heavy: Bool = false,
+            double: Bool = false,
+            dashed: Bool = false
+        ) {
+            self.left = left
+            self.right = right
+            self.up = up
+            self.down = down
+            self.rounded = rounded
+            self.heavy = heavy
+            self.double = double
+            self.dashed = dashed
+        }
+    }
+
+    static func info(for text: String) -> Info? {
+        guard let scalar = text.unicodeScalars.first,
+              text.unicodeScalars.count == 1 else { return nil }
+        return table[scalar]
+    }
+
+    // Light lines
+    private static let h   = Info(left: true, right: true)
+    private static let v   = Info(up: true, down: true)
+    private static let dr  = Info(right: true, down: true)
+    private static let dl  = Info(left: true, down: true)
+    private static let ur  = Info(right: true, up: true)
+    private static let ul  = Info(left: true, up: true)
+    private static let vr  = Info(right: true, up: true, down: true)
+    private static let vl  = Info(left: true, up: true, down: true)
+    private static let dh  = Info(left: true, right: true, down: true)
+    private static let uh  = Info(left: true, right: true, up: true)
+    private static let vh  = Info(left: true, right: true, up: true, down: true)
+
+    // Heavy lines
+    private static let hH  = Info(left: true, right: true, heavy: true)
+    private static let vH  = Info(up: true, down: true, heavy: true)
+    private static let drH = Info(right: true, down: true, heavy: true)
+    private static let dlH = Info(left: true, down: true, heavy: true)
+    private static let urH = Info(right: true, up: true, heavy: true)
+    private static let ulH = Info(left: true, up: true, heavy: true)
+    private static let vrH = Info(right: true, up: true, down: true, heavy: true)
+    private static let vlH = Info(left: true, up: true, down: true, heavy: true)
+    private static let dhH = Info(left: true, right: true, down: true, heavy: true)
+    private static let uhH = Info(left: true, right: true, up: true, heavy: true)
+    private static let vhH = Info(left: true, right: true, up: true, down: true, heavy: true)
+
+    // Double lines
+    private static let hD  = Info(left: true, right: true, double: true)
+    private static let vD  = Info(up: true, down: true, double: true)
+
+    // Rounded corners
+    private static let rDR = Info(right: true, down: true, rounded: true)
+    private static let rDL = Info(left: true, down: true, rounded: true)
+    private static let rUL = Info(left: true, up: true, rounded: true)
+    private static let rUR = Info(right: true, up: true, rounded: true)
+
+    // Dashed lines
+    private static let hDash  = Info(left: true, right: true, dashed: true)
+    private static let vDash  = Info(up: true, down: true, dashed: true)
+    private static let hDashH = Info(left: true, right: true, heavy: true, dashed: true)
+    private static let vDashH = Info(up: true, down: true, heavy: true, dashed: true)
+
+    private static let table: [Unicode.Scalar: Info] = [
+        // Light box drawing
+        "\u{2500}": h,    // ─
+        "\u{2502}": v,    // │
+        "\u{250C}": dr,   // ┌
+        "\u{2510}": dl,   // ┐
+        "\u{2514}": ur,   // └
+        "\u{2518}": ul,   // ┘
+        "\u{251C}": vr,   // ├
+        "\u{2524}": vl,   // ┤
+        "\u{252C}": dh,   // ┬
+        "\u{2534}": uh,   // ┴
+        "\u{253C}": vh,   // ┼
+
+        // Heavy box drawing
+        "\u{2501}": hH,   // ━
+        "\u{2503}": vH,   // ┃
+        "\u{250F}": drH,  // ┏
+        "\u{2513}": dlH,  // ┓
+        "\u{2517}": urH,  // ┗
+        "\u{251B}": ulH,  // ┛
+        "\u{2523}": vrH,  // ┣
+        "\u{252B}": vlH,  // ┫
+        "\u{2533}": dhH,  // ┳
+        "\u{253B}": uhH,  // ┻
+        "\u{254B}": vhH,  // ╋
+
+        // Double box drawing
+        "\u{2550}": hD,   // ═
+        "\u{2551}": vD,   // ║
+
+        // Rounded corners
+        "\u{256D}": rDR,  // ╭
+        "\u{256E}": rDL,  // ╮
+        "\u{256F}": rUL,  // ╯
+        "\u{2570}": rUR,  // ╰
+
+        // Dashed lines
+        "\u{2504}": hDash,  // ┄
+        "\u{2505}": hDashH, // ┅
+        "\u{2506}": vDash,  // ┆
+        "\u{2507}": vDashH, // ┇
+        "\u{2508}": hDash,  // ┈
+        "\u{2509}": hDashH, // ┉
+        "\u{250A}": vDash,  // ┊
+        "\u{250B}": vDashH, // ┋
+
+        // Mixed light/heavy (common subset)
+        "\u{250D}": Info(right: true, down: true),
+        "\u{250E}": Info(right: true, down: true),
+        "\u{2511}": Info(left: true, down: true),
+        "\u{2512}": Info(left: true, down: true),
+        "\u{2515}": Info(right: true, up: true),
+        "\u{2516}": Info(right: true, up: true),
+        "\u{2519}": Info(left: true, up: true),
+        "\u{251A}": Info(left: true, up: true),
+        "\u{251D}": Info(right: true, up: true, down: true),
+        "\u{251E}": Info(right: true, up: true, down: true),
+        "\u{251F}": Info(right: true, up: true, down: true),
+        "\u{2520}": Info(right: true, up: true, down: true, heavy: true),
+        "\u{2521}": Info(right: true, up: true, down: true),
+        "\u{2522}": Info(right: true, up: true, down: true),
+        "\u{2525}": Info(left: true, up: true, down: true),
+        "\u{2526}": Info(left: true, up: true, down: true),
+        "\u{2527}": Info(left: true, up: true, down: true),
+        "\u{2528}": Info(left: true, up: true, down: true, heavy: true),
+        "\u{2529}": Info(left: true, up: true, down: true),
+        "\u{252A}": Info(left: true, up: true, down: true),
+        "\u{252D}": Info(left: true, right: true, down: true),
+        "\u{252E}": Info(left: true, right: true, down: true),
+        "\u{252F}": Info(left: true, right: true, down: true),
+        "\u{2530}": Info(left: true, right: true, down: true),
+        "\u{2531}": Info(left: true, right: true, down: true),
+        "\u{2532}": Info(left: true, right: true, down: true),
+        "\u{2535}": Info(left: true, right: true, up: true),
+        "\u{2536}": Info(left: true, right: true, up: true),
+        "\u{2537}": Info(left: true, right: true, up: true),
+        "\u{2538}": Info(left: true, right: true, up: true),
+        "\u{2539}": Info(left: true, right: true, up: true),
+        "\u{253A}": Info(left: true, right: true, up: true),
+        "\u{253D}": Info(left: true, right: true, up: true, down: true),
+        "\u{253E}": Info(left: true, right: true, up: true, down: true),
+        "\u{253F}": Info(left: true, right: true, up: true, down: true),
+        "\u{2540}": Info(left: true, right: true, up: true, down: true),
+        "\u{2541}": Info(left: true, right: true, up: true, down: true),
+        "\u{2542}": Info(left: true, right: true, up: true, down: true, heavy: true),
+        "\u{2543}": Info(left: true, right: true, up: true, down: true),
+        "\u{2544}": Info(left: true, right: true, up: true, down: true),
+        "\u{2545}": Info(left: true, right: true, up: true, down: true),
+        "\u{2546}": Info(left: true, right: true, up: true, down: true),
+        "\u{2547}": Info(left: true, right: true, up: true, down: true),
+        "\u{2548}": Info(left: true, right: true, up: true, down: true),
+        "\u{2549}": Info(left: true, right: true, up: true, down: true),
+        "\u{254A}": Info(left: true, right: true, up: true, down: true),
+    ]
 }
