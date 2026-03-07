@@ -116,8 +116,9 @@ protocol NvimTransport: Sendable {
 |-----------|-------|
 | `GridState` | 2-D array of `GridCell { character: String, hlID: Int }`. One per `ext_multigrid` grid. |
 | `HighlightTable` | Maps `hl_attr_define` IDs → resolved `NSColor`/`UIColor`, font traits, underline/strikethrough styles. |
-| `CoreTextRenderer` | For each dirty row, shapes a `CTLine` per run of identical highlight, draws into a `CGContext`. Handles wide chars, emoji, ligatures. |
-| `MetalGlyphAtlas` *(opt.)* | Rasterises unique glyphs into a texture atlas; draws the grid as a single instanced draw call. Activated when the grid exceeds a size threshold or user opts in. Falls back to CoreText-only on older hardware. |
+| `CoreTextRenderer` | For each dirty row, shapes a `CTLine` per run of identical highlight, draws into a `CGContext`. Handles wide chars, emoji, ligatures. Owner-draws box-drawing characters (U+2500–U+257F, rounded corners U+256D–U+2570) as CGContext paths instead of font glyphs for pixel-perfect grid alignment. |
+| `BoxDrawingLookup` | Static lookup table mapping ~90 Unicode box-drawing characters to segment connectivity (`left`/`right`/`up`/`down`) and style flags (`heavy`, `rounded`, `double`, `dashed`). Used by `CoreTextRenderer` and forward-compatible with `MetalGlyphAtlas` (same table can drive atlas rasterisation). Defined in `CoreTextRenderer.swift`. |
+| `MetalGlyphAtlas` *(opt.)* | Rasterises unique glyphs into a texture atlas; draws the grid as a single instanced draw call. Activated when the grid exceeds a size threshold or user opts in. Falls back to CoreText-only on older hardware. For box-drawing characters, should use `BoxDrawingLookup` + CGContext path drawing into the atlas bitmap instead of `CTLineDraw` (see Phase 5 notes). |
 | `CursorRenderer` | Draws block/beam/underline cursor with blink animation via `CADisplayLink`/`CVDisplayLink`. |
 
 ### 3.5 `InputHandler` — Keyboard, Mouse, IME
@@ -280,6 +281,7 @@ Display
 - [x] `NvimSession`: attach UI, negotiate capabilities (`ext_multigrid`, `ext_popupmenu`, `ext_cmdline`, `ext_messages`, `ext_linegrid`).
 - [x] `GridState` + `HighlightTable`: process `grid_line`, `hl_attr_define`, `grid_scroll`, `grid_resize`.
 - [x] `CoreTextRenderer`: draw a single grid into an `NSView`/`UIView`.
+- [x] Owner-drawn box-drawing characters: `BoxDrawingLookup` table + `drawBoxDrawingCells()` for pixel-perfect grid lines (light, heavy, double, rounded, dashed variants).
 - [x] Basic `InputHandler`: forward keystrokes, handle modifiers.
 - [x] **Milestone:** editable Neovim session in a macOS window.
 
@@ -312,6 +314,7 @@ Display
 - [ ] `MetalGlyphAtlas`: rasterise glyphs into a texture atlas.
 - [ ] Instanced draw call for the grid (one quad per cell, texture lookup).
 - [ ] `GlyphShader.metal`: vertex + fragment shader.
+- [ ] **Box-drawing in atlas**: In `MetalGlyphAtlas.rasterise()`, detect box-drawing characters via `BoxDrawingLookup.info(for:)` and draw them into the atlas bitmap using CGContext path logic (shared with `CoreTextRenderer`) instead of `CTLineDraw`. This reuses the existing lookup table and segment-drawing code — no procedural Metal geometry needed. Alternatively, extract `drawStraightSegments()`/`drawRoundedCorner()` into a standalone helper that accepts any `CGContext`.
 - [ ] Benchmarks: compare CoreText-only vs. Metal path.
 - [ ] Automatic fallback on unsupported hardware.
 
