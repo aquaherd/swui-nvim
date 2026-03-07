@@ -39,6 +39,26 @@
         ],
         "cwd": "${workspaceFolder}/Packages/NvimRPC",
         "preLaunchTask": "Swift: Build NvimRPC Tests"
+    },
+    {
+        "type": "swift",
+        "request": "launch",
+        "args": [],
+        "cwd": "${workspaceFolder:swuinvim}",
+        "name": "Debug SWUINeovimMac",
+        "target": "SWUINeovimMac",
+        "configuration": "debug",
+        "preLaunchTask": "swift: Build Debug SWUINeovimMac"
+    },
+    {
+        "type": "swift",
+        "request": "launch",
+        "args": [],
+        "cwd": "${workspaceFolder:swuinvim}",
+        "name": "Release SWUINeovimMac",
+        "target": "SWUINeovimMac",
+        "configuration": "release",
+        "preLaunchTask": "swift: Build Release SWUINeovimMac"
     }
 ]
 }

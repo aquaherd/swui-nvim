@@ -285,11 +285,11 @@ Display
 
 ### Phase 2 — SwiftUI Shell (Week 6–7)
 
-- [ ] `SWUINeovimApp` with `WindowGroup`.
-- [ ] macOS menu bar: File (new window, open, close), Edit (undo/redo forwarded to nvim), View (font size), Window.
-- [ ] iPadOS: keyboard shortcut discoverability overlay.
-- [ ] `SettingsView`: font picker, shell path, startup arguments.
-- [ ] Multiple windows — each opens a new `NvimSession`.
+- [x] `SWUINeovimApp` with `WindowGroup`.
+- [x] macOS menu bar: File (new window, open, close), Edit (undo/redo forwarded to nvim), View (font size), Window.
+- [x] iPadOS: keyboard shortcut discoverability overlay.
+- [x] `SettingsView`: font picker, shell path, startup arguments.
+- [x] Multiple windows — each opens a new `NvimSession`.
 
 ### Phase 3 — Overlays (Week 8–9)
 

@@ -19,7 +19,7 @@ actor LocalProcessRPCTransport: RPCTransport {
 
     init(
         nvimPath: String = "/opt/local/bin/nvim",
-        arguments: [String] = ["--embed", "--headless", "-u", "NONE", "-n"]
+        arguments: [String] = ["--embed", "--headless"]
     ) {
         self.nvimPath = nvimPath
         self.arguments = arguments
@@ -36,6 +36,14 @@ actor LocalProcessRPCTransport: RPCTransport {
 
         process.executableURL = URL(fileURLWithPath: nvimPath)
         process.arguments = arguments
+        var env = ProcessInfo.processInfo.environment
+        if (env["TERM"] ?? "").isEmpty {
+            env["TERM"] = "xterm-256color"
+        }
+        if (env["COLORTERM"] ?? "").isEmpty {
+            env["COLORTERM"] = "truecolor"
+        }
+        process.environment = env
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -52,7 +60,7 @@ actor LocalProcessRPCTransport: RPCTransport {
 
         process.terminationHandler = { [weak self] _ in
             guard let self else { return }
-            Task { await self.finishStream() }
+            Task { await self.handleProcessTermination() }
         }
 
         try process.run()
@@ -60,11 +68,15 @@ actor LocalProcessRPCTransport: RPCTransport {
     }
 
     func send(_ data: Data) async throws {
-        guard isStarted else {
+        guard isStarted, process.isRunning else {
             throw RPCError.transportClosed
         }
 
-        stdinPipe.fileHandleForWriting.write(data)
+        do {
+            try stdinPipe.fileHandleForWriting.write(contentsOf: data)
+        } catch {
+            throw RPCError.transportClosed
+        }
     }
 
     func stop() async {
@@ -86,5 +98,11 @@ actor LocalProcessRPCTransport: RPCTransport {
     private func finishStream() {
         continuation?.finish()
         continuation = nil
+    }
+
+    private func handleProcessTermination() {
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        isStarted = false
+        finishStream()
     }
 }
