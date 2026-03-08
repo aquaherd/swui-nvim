@@ -295,11 +295,11 @@ Display
 
 ### Phase 3 — Overlays (Week 8–9)
 
-- [ ] `ext_popupmenu` → `PopupMenuOverlay` (completion list).
-- [ ] `ext_cmdline` → `CmdlineOverlay` (command-line at bottom).
-- [ ] `ext_messages` → `MessageOverlay` (notification banners).
-- [ ] Floating windows (`win_float_pos`) → overlay positioned cards.
-- [ ] Tooltip / hover overlay for LSP hover info.
+- [x] `ext_popupmenu` → `PopupMenuOverlay` (completion list).
+- [x] `ext_cmdline` → `CmdlineOverlay` (command-line at bottom).
+- [x] `ext_messages` → `MessageOverlay` (notification banners).
+- [x] Floating windows (`win_float_pos`) → overlay positioned cards.
+- [x] Tooltip / hover overlay for LSP hover info.
 
 ### Phase 4 — SSH Transport (Week 10–12)
 

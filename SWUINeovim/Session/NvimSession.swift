@@ -485,6 +485,15 @@ public final class Grid: @unchecked Sendable {
 
 // MARK: - Multigrid Window Info
 
+/// The anchor corner for a floating window, controlling which corner of
+/// the float is placed at the anchor position.
+public enum FloatAnchor: String, Sendable, Equatable {
+    case northWest = "NW"
+    case northEast = "NE"
+    case southWest = "SW"
+    case southEast = "SE"
+}
+
 /// Position information for a multigrid window.
 public struct WindowPosition: Sendable, Equatable {
     public var gridID: Int
@@ -495,6 +504,7 @@ public struct WindowPosition: Sendable, Equatable {
 
     /// For floating windows only.
     public var isFloating: Bool
+    public var anchor: FloatAnchor
     public var anchorGridID: Int?
     public var anchorRow: Double?
     public var anchorCol: Double?
@@ -508,6 +518,7 @@ public struct WindowPosition: Sendable, Equatable {
         width: Int = 0,
         height: Int = 0,
         isFloating: Bool = false,
+        anchor: FloatAnchor = .northWest,
         anchorGridID: Int? = nil,
         anchorRow: Double? = nil,
         anchorCol: Double? = nil,
@@ -520,6 +531,7 @@ public struct WindowPosition: Sendable, Equatable {
         self.width = width
         self.height = height
         self.isFloating = isFloating
+        self.anchor = anchor
         self.anchorGridID = anchorGridID
         self.anchorRow = anchorRow
         self.anchorCol = anchorCol
@@ -563,7 +575,10 @@ public final class NvimSession: ObservableObject {
     @Published public private(set) var modeInfoList: [ModeInfo] = []
     @Published public private(set) var popupMenu = PopupMenuState()
     @Published public private(set) var cmdline = CmdlineState()
+    @Published public private(set) var cmdlineBlock: [[(highlightID: Int, text: String)]] = []
     @Published public private(set) var messages: [MessageEntry] = []
+    @Published public private(set) var messageHistory: [MessageEntry] = []
+    @Published public private(set) var tooltip = TooltipState()
     @Published public private(set) var windowPositions: [Int: WindowPosition] = [:]
     @Published public private(set) var title: String = ""
     @Published public private(set) var isBusy: Bool = false
@@ -1010,6 +1025,14 @@ public final class NvimSession: ObservableObject {
             cmdline.isVisible = false
         case "cmdline_pos":
             handleCmdlinePos(args)
+        case "cmdline_special_char":
+            handleCmdlineSpecialChar(args)
+        case "cmdline_block_show":
+            handleCmdlineBlockShow(args)
+        case "cmdline_block_append":
+            handleCmdlineBlockAppend(args)
+        case "cmdline_block_hide":
+            cmdlineBlock.removeAll()
 
         // --- Messages ---
         case "msg_show":
@@ -1018,6 +1041,8 @@ public final class NvimSession: ObservableObject {
             messages.removeAll()
         case "msg_showmode", "msg_showcmd", "msg_ruler":
             break // Could be shown in a status area
+        case "msg_history_show":
+            handleMsgHistoryShow(args)
 
         // --- Misc ---
         case "set_title":
@@ -1195,6 +1220,8 @@ public final class NvimSession: ObservableObject {
               let anchorGrid = args[3].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
+        let anchorStr = args[2].stringValue ?? "NW"
+        let anchor = FloatAnchor(rawValue: anchorStr) ?? .northWest
         let anchorRow = args[4].doubleValue ?? args[4].intValue.flatMap({ Double($0) }) ?? 0
         let anchorCol = args[5].doubleValue ?? args[5].intValue.flatMap({ Double($0) }) ?? 0
         let focusable = args.count > 6 ? (args[6].boolValue ?? true) : true
@@ -1203,21 +1230,69 @@ public final class NvimSession: ObservableObject {
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
             isFloating: true,
+            anchor: anchor,
             anchorGridID: anchorGrid,
             anchorRow: anchorRow,
             anchorCol: anchorCol,
             focusable: focusable,
             zIndex: zIndex
         )
+
+        // Detect tooltip-like floating windows (hover info, diagnostics).
+        // These are typically small, non-focusable floating windows.
+        // We populate the tooltip state so the TooltipOverlay can display them.
+        if !focusable, let grid = grids[gridID] {
+            var content: [(highlightID: Int, text: String)] = []
+            for row in 0..<grid.rows {
+                if let rowCells = grid.getRow(row) {
+                    if row > 0 {
+                        content.append((highlightID: 0, text: "\n"))
+                    }
+                    // Group cells by highlight for styled output
+                    var currentText = ""
+                    var currentHL = 0
+                    for cell in rowCells {
+                        if cell.highlightID == currentHL {
+                            currentText += cell.text
+                        } else {
+                            if !currentText.isEmpty {
+                                content.append((highlightID: currentHL, text: currentText))
+                            }
+                            currentText = cell.text
+                            currentHL = cell.highlightID
+                        }
+                    }
+                    if !currentText.isEmpty {
+                        content.append((highlightID: currentHL, text: currentText))
+                    }
+                }
+            }
+
+            tooltip = TooltipState(
+                isVisible: true,
+                content: content,
+                row: Int(anchorRow),
+                col: Int(anchorCol),
+                gridID: anchorGrid
+            )
+        }
     }
 
     private func handleWinHide(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
+        // If this was a tooltip floating window, hide the tooltip
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.focusable {
+            tooltip.isVisible = false
+        }
         windowPositions.removeValue(forKey: gridID)
     }
 
     private func handleWinClose(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
+        // If this was a tooltip floating window, hide the tooltip
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.focusable {
+            tooltip.isVisible = false
+        }
         grids.removeValue(forKey: gridID)
         windowPositions.removeValue(forKey: gridID)
     }
@@ -1302,6 +1377,53 @@ public final class NvimSession: ObservableObject {
         cmdline.position = pos
     }
 
+    private func handleCmdlineSpecialChar(_ args: [MsgPackValue]) {
+        // args: [c, shift, level]
+        guard args.count >= 1,
+              let char = args[0].stringValue
+        else { return }
+        // Insert the special character at the cursor position in the command line content
+        var text = cmdline.text
+        let pos = min(cmdline.position, text.count)
+        let insertIndex = text.index(text.startIndex, offsetBy: pos)
+        text.insert(contentsOf: char, at: insertIndex)
+        cmdline.content = [(highlightID: 0, text: text)]
+        cmdline.position = pos + char.count
+    }
+
+    private func handleCmdlineBlockShow(_ args: [MsgPackValue]) {
+        // args: [lines] where lines is [[attr, text], ...]
+        cmdlineBlock.removeAll()
+        guard let linesArr = args.first?.arrayValue else { return }
+
+        for lineVal in linesArr {
+            guard case .array(let chunks) = lineVal else { continue }
+            var line: [(highlightID: Int, text: String)] = []
+            for chunk in chunks {
+                guard case .array(let parts) = chunk, parts.count >= 2,
+                      let hlID = parts[0].intValue.flatMap({ Int(exactly: $0) }),
+                      let text = parts[1].stringValue
+                else { continue }
+                line.append((highlightID: hlID, text: text))
+            }
+            cmdlineBlock.append(line)
+        }
+    }
+
+    private func handleCmdlineBlockAppend(_ args: [MsgPackValue]) {
+        // args: [line] where line is [[attr, text], ...]
+        guard let lineArr = args.first?.arrayValue else { return }
+        var line: [(highlightID: Int, text: String)] = []
+        for chunk in lineArr {
+            guard case .array(let parts) = chunk, parts.count >= 2,
+                  let hlID = parts[0].intValue.flatMap({ Int(exactly: $0) }),
+                  let text = parts[1].stringValue
+            else { continue }
+            line.append((highlightID: hlID, text: text))
+        }
+        cmdlineBlock.append(line)
+    }
+
     // MARK: - Message Handlers
 
     private func handleMsgShow(_ args: [MsgPackValue]) {
@@ -1327,6 +1449,28 @@ public final class NvimSession: ObservableObject {
             messages[messages.count - 1] = entry
         } else {
             messages.append(entry)
+        }
+    }
+
+    private func handleMsgHistoryShow(_ args: [MsgPackValue]) {
+        // args: [entries] where entries is [[kind, content], ...]
+        guard let entriesArr = args.first?.arrayValue else { return }
+        messageHistory.removeAll()
+
+        for entryVal in entriesArr {
+            guard case .array(let parts) = entryVal, parts.count >= 2 else { continue }
+            let kind = parts[0].stringValue ?? ""
+            var content: [(highlightID: Int, text: String)] = []
+            if case .array(let contentParts) = parts[1] {
+                for part in contentParts {
+                    guard case .array(let chunk) = part, chunk.count >= 2,
+                          let hlID = chunk[0].intValue.flatMap({ Int(exactly: $0) }),
+                          let text = chunk[1].stringValue
+                    else { continue }
+                    content.append((highlightID: hlID, text: text))
+                }
+            }
+            messageHistory.append(MessageEntry(kind: kind, content: content))
         }
     }
 
