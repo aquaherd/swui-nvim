@@ -498,9 +498,11 @@ public final class CoreTextRenderer: @unchecked Sendable {
             let ctLine = CTLineCreateWithAttributedString(attrString)
 
             let x = CGFloat(run.startColumn) * cellWidth
+            let runWidth = CGFloat(run.columnCount) * cellWidth
             let y = rowY + baselineOffset
 
             context.saveGState()
+            context.clip(to: CGRect(x: x, y: rowY, width: runWidth, height: cellHeight))
             context.textPosition = CGPoint(x: x, y: y)
             CTLineDraw(ctLine, context)
             context.restoreGState()

@@ -195,6 +195,8 @@ final class EditorGridNSView: NSView {
 
         // 2) Draw text per cell in flipped coordinates for pixel-stable placement.
         //    Box-drawing characters are skipped here and rendered in step 3.
+        //    Each cell is clipped to its rect to prevent glyph overhang from
+        //    bleeding into adjacent cells (e.g. italic, cascaded fallback fonts).
         for row in 0..<snapshot.rows {
             for col in 0..<snapshot.cols {
                 let cell = snapshot.cells[row][col]
@@ -202,11 +204,19 @@ final class EditorGridNSView: NSView {
                 if BoxDrawing.info(for: cell.text) != nil { continue }
                 let fg = foregroundColor(for: cell.highlightID)
 
-                let point = CGPoint(
+                let cellRect = CGRect(
                     x: CGFloat(col) * cellSize.width,
-                    y: CGFloat(row) * cellSize.height + textYOffset
+                    y: CGFloat(row) * cellSize.height,
+                    width: cellSize.width,
+                    height: cellSize.height
+                )
+                let point = CGPoint(
+                    x: cellRect.origin.x,
+                    y: cellRect.origin.y + textYOffset
                 )
 
+                cg.saveGState()
+                cg.clip(to: cellRect)
                 (cell.text as NSString).draw(
                     at: point,
                     withAttributes: [
@@ -214,6 +224,7 @@ final class EditorGridNSView: NSView {
                         .foregroundColor: fg,
                     ]
                 )
+                cg.restoreGState()
             }
         }
 
