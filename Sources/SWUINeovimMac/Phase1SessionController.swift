@@ -58,8 +58,21 @@ final class Phase1SessionController {
     private var lastAppliedResize: (cols: Int, rows: Int)?
     private var userInitiatedDisconnect = false
 
+    // Pending (non-observable) grid state — mutated during redraw batch,
+    // then copied to observable properties on "flush" to prevent mid-batch renders.
+    private var pendingRows: Int = 36
+    private var pendingCols: Int = 120
+    private var pendingCells: [[GridCellState]] = []
+    private var pendingCursorRow: Int = 0
+    private var pendingCursorCol: Int = 0
+    private var pendingDefaultFG: UInt32 = 0xFFFFFF
+    private var pendingDefaultBG: UInt32 = 0x000000
+    private var pendingHighlights: [Int: HighlightStyle] = [:]
+    private var pendingMode: String = "n"
+
     init() {
         gridCells = Self.makeBlankGrid(rows: gridRows, cols: gridCols)
+        pendingCells = gridCells
     }
 
     var gridSnapshot: GridSnapshot {
@@ -306,9 +319,17 @@ final class Phase1SessionController {
     }
 
     private func resetGrid() {
-        gridRows = 36
-        gridCols = 120
-        gridCells = Self.makeBlankGrid(rows: gridRows, cols: gridCols)
+        pendingRows = 36
+        pendingCols = 120
+        pendingCells = Self.makeBlankGrid(rows: pendingRows, cols: pendingCols)
+        pendingCursorRow = 0
+        pendingCursorCol = 0
+        pendingHighlights.removeAll()
+        pendingMode = "n"
+        // Also reset observable state immediately for a clean slate
+        gridRows = pendingRows
+        gridCols = pendingCols
+        gridCells = pendingCells
         cursorRow = 0
         cursorCol = 0
         highlightTable.removeAll()
@@ -352,9 +373,25 @@ final class Phase1SessionController {
             handleDefaultColorsSet(args)
         case "mode_change":
             handleModeChange(args)
+        case "flush":
+            handleFlush()
         default:
             break
         }
+    }
+
+    /// Commit pending grid state to observable properties, triggering a single
+    /// SwiftUI view update per redraw batch instead of per-event.
+    private func handleFlush() {
+        gridRows = pendingRows
+        gridCols = pendingCols
+        gridCells = pendingCells
+        cursorRow = pendingCursorRow
+        cursorCol = pendingCursorCol
+        defaultForeground = pendingDefaultFG
+        defaultBackground = pendingDefaultBG
+        highlightTable = pendingHighlights
+        currentMode = pendingMode
     }
 
     private func handleGridResize(_ args: [MsgPackValue]) {
@@ -363,9 +400,9 @@ final class Phase1SessionController {
               let rows = args[2].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        gridRows = max(1, rows)
-        gridCols = max(1, cols)
-        gridCells = Self.makeBlankGrid(rows: gridRows, cols: gridCols)
+        pendingRows = max(1, rows)
+        pendingCols = max(1, cols)
+        pendingCells = Self.makeBlankGrid(rows: pendingRows, cols: pendingCols)
     }
 
     private func handleGridLine(_ args: [MsgPackValue]) {
@@ -373,7 +410,7 @@ final class Phase1SessionController {
               let row = args[1].intValue.flatMap({ Int(exactly: $0) }),
               let colStart = args[2].intValue.flatMap({ Int(exactly: $0) }),
               let cellData = args[3].arrayValue,
-              row >= 0, row < gridRows
+              row >= 0, row < pendingRows
         else { return }
 
         var col = max(0, colStart)
@@ -395,8 +432,8 @@ final class Phase1SessionController {
             }
 
             for _ in 0..<repeatCount {
-                guard col < gridCols else { break }
-                gridCells[row][col] = GridCellState(text: text, highlightID: currentHL)
+                guard col < pendingCols else { break }
+                pendingCells[row][col] = GridCellState(text: text, highlightID: currentHL)
                 col += 1
             }
         }
@@ -408,13 +445,13 @@ final class Phase1SessionController {
               let col = args[2].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        cursorRow = max(0, min(gridRows - 1, row))
-        cursorCol = max(0, min(gridCols - 1, col))
+        pendingCursorRow = max(0, min(pendingRows - 1, row))
+        pendingCursorCol = max(0, min(pendingCols - 1, col))
     }
 
     private func handleGridClear(_ args: [MsgPackValue]) {
         _ = args
-        gridCells = Self.makeBlankGrid(rows: gridRows, cols: gridCols)
+        pendingCells = Self.makeBlankGrid(rows: pendingRows, cols: pendingCols)
     }
 
     private func handleGridScroll(_ args: [MsgPackValue]) {
@@ -426,10 +463,10 @@ final class Phase1SessionController {
               let rowCount = args[5].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        let topBound = max(0, min(gridRows, top))
-        let bottomBound = max(topBound, min(gridRows, bottom))
-        let leftBound = max(0, min(gridCols, left))
-        let rightBound = max(leftBound, min(gridCols, right))
+        let topBound = max(0, min(pendingRows, top))
+        let bottomBound = max(topBound, min(pendingRows, bottom))
+        let leftBound = max(0, min(pendingCols, left))
+        let rightBound = max(leftBound, min(pendingCols, right))
 
         guard rowCount != 0,
               bottomBound > topBound,
@@ -439,12 +476,12 @@ final class Phase1SessionController {
         if rowCount > 0 {
             for row in topBound..<(bottomBound - rowCount) {
                 for col in leftBound..<rightBound {
-                    gridCells[row][col] = gridCells[row + rowCount][col]
+                    pendingCells[row][col] = pendingCells[row + rowCount][col]
                 }
             }
             for row in max(topBound, bottomBound - rowCount)..<bottomBound {
                 for col in leftBound..<rightBound {
-                    gridCells[row][col] = GridCellState()
+                    pendingCells[row][col] = GridCellState()
                 }
             }
         } else {
@@ -452,12 +489,12 @@ final class Phase1SessionController {
             guard amount < (bottomBound - topBound) else { return }
             for row in stride(from: bottomBound - 1, through: topBound + amount, by: -1) {
                 for col in leftBound..<rightBound {
-                    gridCells[row][col] = gridCells[row - amount][col]
+                    pendingCells[row][col] = pendingCells[row - amount][col]
                 }
             }
             for row in topBound..<(topBound + amount) {
                 for col in leftBound..<rightBound {
-                    gridCells[row][col] = GridCellState()
+                    pendingCells[row][col] = GridCellState()
                 }
             }
         }
@@ -485,21 +522,21 @@ final class Phase1SessionController {
             }
         }
 
-        highlightTable[hlID] = style
+        pendingHighlights[hlID] = style
     }
 
     private func handleDefaultColorsSet(_ args: [MsgPackValue]) {
         guard args.count >= 2 else { return }
         if let fg = args[0].uintValue.flatMap({ UInt32(exactly: $0) }) {
-            defaultForeground = fg
+            pendingDefaultFG = fg
         }
         if let bg = args[1].uintValue.flatMap({ UInt32(exactly: $0) }) {
-            defaultBackground = bg
+            pendingDefaultBG = bg
         }
     }
 
     private func handleModeChange(_ args: [MsgPackValue]) {
         guard let mode = args.first?.stringValue, !mode.isEmpty else { return }
-        currentMode = mode
+        pendingMode = mode
     }
 }
