@@ -418,7 +418,7 @@ final class Phase1SessionController {
 
         for cell in cellData {
             guard case .array(let spec) = cell, !spec.isEmpty else { continue }
-            guard let text = spec[0].stringValue, !text.isEmpty else { continue }
+            guard let text = spec[0].stringValue else { continue }
 
             if spec.count >= 2, let hl = spec[1].intValue.flatMap({ Int(exactly: $0) }) {
                 currentHL = hl
