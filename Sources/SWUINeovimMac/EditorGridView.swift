@@ -552,81 +552,89 @@ final class EditorGridNSView: NSView {
 
                 if info.rounded {
                     drawRoundedCorner(info: info, in: cg, cellRect: cellRect, cx: cx, cy: cy)
-                } else {
-                    if info.left {
-                        cg.move(to: CGPoint(x: cellRect.minX, y: cy))
-                        cg.addLine(to: CGPoint(x: cx, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.right {
-                        cg.move(to: CGPoint(x: cx, y: cy))
-                        cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.up {
-                        cg.move(to: CGPoint(x: cx, y: cellRect.minY))
-                        cg.addLine(to: CGPoint(x: cx, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.down {
-                        cg.move(to: CGPoint(x: cx, y: cy))
-                        cg.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
-                        cg.strokePath()
-                    }
-                }
-
-                // Double-line variants: draw a second line offset from the first
-                if info.double {
-                    let offset: CGFloat = 2.0
-                    cg.setLineWidth(lineWidth)
-                    if info.left && info.right {
-                        // Two horizontal lines
-                        cg.move(to: CGPoint(x: cellRect.minX, y: cy - offset))
-                        cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy - offset))
-                        cg.strokePath()
-                        cg.move(to: CGPoint(x: cellRect.minX, y: cy + offset))
-                        cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy + offset))
-                        cg.strokePath()
-                    } else if info.up && info.down {
-                        // Two vertical lines
-                        cg.move(to: CGPoint(x: cx - offset, y: cellRect.minY))
-                        cg.addLine(to: CGPoint(x: cx - offset, y: cellRect.maxY))
-                        cg.strokePath()
-                        cg.move(to: CGPoint(x: cx + offset, y: cellRect.minY))
-                        cg.addLine(to: CGPoint(x: cx + offset, y: cellRect.maxY))
-                        cg.strokePath()
-                    }
-                }
-
-                // Dashed line variants
-                if info.dashed {
+                } else if info.dashed {
                     let dashLen: CGFloat = cellSize.width * 0.2
                     cg.setLineDash(phase: 0, lengths: [dashLen, dashLen])
-                    if info.left {
-                        cg.move(to: CGPoint(x: cellRect.minX, y: cy))
-                        cg.addLine(to: CGPoint(x: cx, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.right {
-                        cg.move(to: CGPoint(x: cx, y: cy))
-                        cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.up {
-                        cg.move(to: CGPoint(x: cx, y: cellRect.minY))
-                        cg.addLine(to: CGPoint(x: cx, y: cy))
-                        cg.strokePath()
-                    }
-                    if info.down {
-                        cg.move(to: CGPoint(x: cx, y: cy))
-                        cg.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
-                        cg.strokePath()
-                    }
+                    drawStraightSegments(info: info, in: cg, cellRect: cellRect, cx: cx, cy: cy)
                     cg.setLineDash(phase: 0, lengths: [])
+                } else if info.double {
+                    let offset: CGFloat = 2.0
+                    cg.setLineWidth(lineWidth)
+                    if info.left || info.right {
+                        if info.left {
+                            cg.move(to: CGPoint(x: cellRect.minX, y: cy - offset))
+                            cg.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy - offset))
+                            cg.strokePath()
+                            cg.move(to: CGPoint(x: cellRect.minX, y: cy + offset))
+                            cg.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy + offset))
+                            cg.strokePath()
+                        }
+                        if info.right && !info.left {
+                            cg.move(to: CGPoint(x: cx, y: cy - offset))
+                            cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy - offset))
+                            cg.strokePath()
+                            cg.move(to: CGPoint(x: cx, y: cy + offset))
+                            cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy + offset))
+                            cg.strokePath()
+                        }
+                    }
+                    if info.up || info.down {
+                        // Flipped: up = minY, down = maxY
+                        if info.up {
+                            cg.move(to: CGPoint(x: cx - offset, y: cellRect.minY))
+                            cg.addLine(to: CGPoint(x: cx - offset, y: info.down ? cellRect.maxY : cy))
+                            cg.strokePath()
+                            cg.move(to: CGPoint(x: cx + offset, y: cellRect.minY))
+                            cg.addLine(to: CGPoint(x: cx + offset, y: info.down ? cellRect.maxY : cy))
+                            cg.strokePath()
+                        }
+                        if info.down && !info.up {
+                            cg.move(to: CGPoint(x: cx - offset, y: cy))
+                            cg.addLine(to: CGPoint(x: cx - offset, y: cellRect.maxY))
+                            cg.strokePath()
+                            cg.move(to: CGPoint(x: cx + offset, y: cy))
+                            cg.addLine(to: CGPoint(x: cx + offset, y: cellRect.maxY))
+                            cg.strokePath()
+                        }
+                    }
+                } else {
+                    drawStraightSegments(info: info, in: cg, cellRect: cellRect, cx: cx, cy: cy)
                 }
 
                 cg.restoreGState()
             }
+        }
+    }
+
+    private func drawStraightSegments(
+        info: BoxDrawing.Info,
+        in cg: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat
+    ) {
+        // Flipped coordinates: Y increases downward.
+        // Grid "up" (smaller row index) = minY.
+        // Grid "down" (larger row index) = maxY.
+        if info.left {
+            cg.move(to: CGPoint(x: cellRect.minX, y: cy))
+            cg.addLine(to: CGPoint(x: cx, y: cy))
+            cg.strokePath()
+        }
+        if info.right {
+            cg.move(to: CGPoint(x: cx, y: cy))
+            cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
+            cg.strokePath()
+        }
+        if info.up {
+            cg.move(to: CGPoint(x: cx, y: cellRect.minY))
+            cg.addLine(to: CGPoint(x: cx, y: cy))
+            cg.strokePath()
+        }
+        if info.down {
+            cg.move(to: CGPoint(x: cx, y: cy))
+            cg.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
+            cg.strokePath()
         }
     }
 
