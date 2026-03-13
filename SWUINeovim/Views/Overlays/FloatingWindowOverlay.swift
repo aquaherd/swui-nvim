@@ -23,7 +23,7 @@ struct FloatingWindowOverlay: View {
     let windowPositions: [Int: WindowPosition]
 
     /// Highlight table for resolving highlight IDs to colors.
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
 
     /// Default foreground/background colors.
     let defaultColors: DefaultColors
@@ -108,7 +108,7 @@ struct FloatingWindowOverlay: View {
 private struct FloatingWindowCard: View {
     let grid: Grid
     let position: WindowPosition
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
     let defaultColors: DefaultColors
     let cellSize: CGSize
 
@@ -151,7 +151,7 @@ private struct FloatingWindowCard: View {
 /// Renders a single row of a floating window as styled text runs.
 private struct FloatingWindowRow: View {
     let cells: [GridCell]
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
     let defaultColors: DefaultColors
 
     var body: some View {

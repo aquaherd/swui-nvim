@@ -47,7 +47,7 @@ public enum RedrawEvent: Sendable, Equatable {
     case gridResize(grid: Int, width: Int, height: Int)
     case gridClear(grid: Int)
     case gridCursorGoto(grid: Int, row: Int, col: Int)
-    case gridLine(grid: Int, row: Int, colStart: Int, cells: [GridCell], wrap: Bool)
+    case gridLine(grid: Int, row: Int, colStart: Int, cells: [GridLineCellUpdate], wrap: Bool)
     case gridScroll(grid: Int, top: Int, bottom: Int, left: Int, right: Int, rows: Int, cols: Int)
     case gridDestroy(grid: Int)
 
@@ -132,7 +132,7 @@ public enum RedrawEvent: Sendable, Equatable {
 // MARK: - Supporting Types
 
 /// A single cell update within a `grid_line` event.
-public struct GridCell: Sendable, Equatable {
+public struct GridLineCellUpdate: Sendable, Equatable {
     /// The character(s) to display in this cell. May be empty for repeat cells.
     public let text: String
 
@@ -289,24 +289,7 @@ public enum FloatAnchor: String, Sendable, Equatable {
     }
 }
 
-/// A popup menu item from `popupmenu_show`.
-public struct PopupMenuItem: Sendable, Equatable {
-    /// The completion word.
-    public let word: String
-    /// The kind of completion (e.g. "v" for variable, "f" for function).
-    public let kind: String
-    /// Extra text shown beside the completion.
-    public let menu: String
-    /// Additional info (shown in preview window).
-    public let info: String
-
-    public init(word: String, kind: String = "", menu: String = "", info: String = "") {
-        self.word = word
-        self.kind = kind
-        self.menu = menu
-        self.info = info
-    }
-}
+// NOTE: PopupMenuItem is defined in NvimSession.swift (with Identifiable)
 
 /// A styled chunk of text for command-line display.
 public struct CmdlineChunk: Sendable, Equatable {
@@ -635,7 +618,7 @@ extension RedrawBatch {
               case .array(let cellArrays) = args[3]
         else { return nil }
 
-        var cells: [GridCell] = []
+        var cells: [GridLineCellUpdate] = []
         cells.reserveCapacity(cellArrays.count)
 
         for cellValue in cellArrays {
@@ -645,7 +628,7 @@ extension RedrawBatch {
             let hlID: Int? = cellParts.count > 1 ? cellParts[1].intValue.map { Int($0) } : nil
             let repeatCount: Int = cellParts.count > 2 ? (cellParts[2].intValue.map { Int($0) } ?? 1) : 1
 
-            cells.append(GridCell(text: text, hlID: hlID, repeat_: repeatCount))
+            cells.append(GridLineCellUpdate(text: text, hlID: hlID, repeat_: repeatCount))
         }
 
         // Optional wrap boolean at position 4

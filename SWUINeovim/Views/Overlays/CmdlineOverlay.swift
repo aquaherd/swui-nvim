@@ -36,7 +36,7 @@ struct CmdlineOverlay: View {
     let state: CmdlineState
 
     /// Highlight table for resolving highlight IDs to colors.
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
 
     /// Default foreground/background colors.
     let defaultColors: DefaultColors
@@ -302,7 +302,7 @@ struct CmdlineBlockOverlay: View {
     var blockLines: [[(highlightID: Int, text: String)]]
 
     /// Highlight table for resolving highlight IDs to colors.
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
 
     /// Default foreground/background colors.
     let defaultColors: DefaultColors

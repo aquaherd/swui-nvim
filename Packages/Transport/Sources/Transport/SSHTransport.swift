@@ -1,15 +1,14 @@
 // SSHTransport.swift
 // Transport
 //
-// Placeholder for NIOSSH-based remote Neovim transport.
-// Connects to a remote host via SSH, executes `nvim --headless`,
+// NIOSSH-based remote Neovim transport.
+// Connects to a remote host via SSH, executes `nvim --headless --embed`,
 // and tunnels MsgPack-RPC over the SSH exec channel.
-//
-// Dependencies (to be added to Package.swift when implemented):
-//   - swift-nio
-//   - swift-nio-ssh
 
 import Foundation
+import NIO
+import NIOFoundationCompat
+import NIOSSH
 
 /// Configuration for establishing an SSH connection to a remote Neovim instance.
 public struct SSHConnectionConfig: Sendable, Codable, Hashable {
@@ -75,109 +74,443 @@ public enum SSHConnectionState: Sendable, Hashable {
     case failed(String)
 }
 
-/// SSH transport that connects to a remote Neovim instance over SSH.
-///
-/// This is currently a **stub implementation**. The actual networking will be
-/// provided by `NIOSSH` (Apple's Swift-native SSH library) which uses
-/// `CryptoKit` under the hood — no custom crypto, no export compliance issues.
+// MARK: - NIOSSH Channel Handlers
+
+/// Handles the exec channel's data I/O, bridging NIO channel reads to an
+/// `AsyncThrowingStream` and allowing writes via a reference to the channel.
+private final class ExecChannelHandler: ChannelDuplexHandler, @unchecked Sendable {
+    typealias InboundIn = SSHChannelData
+    typealias InboundOut = ByteBuffer
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = SSHChannelData
+
+    private let dataContinuation: AsyncThrowingStream<Data, Error>.Continuation
+
+    init(continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+        self.dataContinuation = continuation
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let channelData = self.unwrapInboundIn(data)
+
+        guard case .byteBuffer(let buffer) = channelData.data else { return }
+
+        switch channelData.type {
+        case .channel:
+            let bytes = Data(buffer: buffer)
+            if !bytes.isEmpty {
+                dataContinuation.yield(bytes)
+            }
+        case .stdErr:
+            // Log stderr but don't feed it to RPC
+            if let text = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes) {
+                #if DEBUG
+                print("[ssh nvim stderr] \(text)")
+                #endif
+            }
+        default:
+            break
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        dataContinuation.finish(throwing: SSHTransportError.connectionFailed(error.localizedDescription))
+        context.close(promise: nil)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        dataContinuation.finish()
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let buffer = self.unwrapOutboundIn(data)
+        let wrapped = SSHChannelData(type: .channel, data: .byteBuffer(buffer))
+        context.write(self.wrapOutboundOut(wrapped), promise: promise)
+    }
+}
+
+/// Authentication delegate that tries password or private key auth.
+private final class ClientAuthDelegate: NIOSSHClientUserAuthenticationDelegate, @unchecked Sendable {
+    private let username: String
+    private let authentication: SSHAuthentication
+    private var attemptedMethods: Set<String> = []
+
+    init(username: String, authentication: SSHAuthentication) {
+        self.username = username
+        self.authentication = authentication
+    }
+
+    func nextAuthenticationType(
+        availableMethods: NIOSSHAvailableUserAuthenticationMethods,
+        nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
+    ) {
+        switch authentication {
+        case .password(let password):
+            guard availableMethods.contains(.password), !attemptedMethods.contains("password") else {
+                nextChallengePromise.succeed(nil)
+                return
+            }
+            attemptedMethods.insert("password")
+            nextChallengePromise.succeed(.init(
+                username: username,
+                serviceName: "",
+                offer: .password(.init(password: password))
+            ))
+
+        case .privateKey(let path, let passphrase):
+            guard availableMethods.contains(.publicKey), !attemptedMethods.contains("publicKey") else {
+                nextChallengePromise.succeed(nil)
+                return
+            }
+            attemptedMethods.insert("publicKey")
+            do {
+                let keyData = try Data(contentsOf: URL(fileURLWithPath: path))
+                let keyString = String(decoding: keyData, as: UTF8.self)
+                let key: NIOSSHPrivateKey
+                if let passphrase {
+                    key = try .init(ed25519Key: .init(rawRepresentation: parsePrivateKeyBytes(keyString, passphrase: passphrase)))
+                } else {
+                    // Try parsing as different key types
+                    key = try parseSSHPrivateKey(keyString)
+                }
+                nextChallengePromise.succeed(.init(
+                    username: username,
+                    serviceName: "",
+                    offer: .privateKey(.init(privateKey: key))
+                ))
+            } catch {
+                nextChallengePromise.succeed(nil)
+            }
+
+        case .agent:
+            // Agent auth is not directly supported by NIOSSH.
+            // Fall back: try to read default key files from ~/.ssh/
+            guard availableMethods.contains(.publicKey), !attemptedMethods.contains("agentKey") else {
+                nextChallengePromise.succeed(nil)
+                return
+            }
+            attemptedMethods.insert("agentKey")
+            
+            let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+            let keyPaths = [
+                "\(homeDir)/.ssh/id_ed25519",
+                "\(homeDir)/.ssh/id_rsa",
+                "\(homeDir)/.ssh/id_ecdsa",
+            ]
+            
+            for keyPath in keyPaths {
+                guard FileManager.default.fileExists(atPath: keyPath) else { continue }
+                do {
+                    let keyData = try Data(contentsOf: URL(fileURLWithPath: keyPath))
+                    let keyString = String(decoding: keyData, as: UTF8.self)
+                    let key = try parseSSHPrivateKey(keyString)
+                    nextChallengePromise.succeed(.init(
+                        username: username,
+                        serviceName: "",
+                        offer: .privateKey(.init(privateKey: key))
+                    ))
+                    return
+                } catch {
+                    continue
+                }
+            }
+            nextChallengePromise.succeed(nil)
+        }
+    }
+}
+
+/// Host key verifier that accepts all host keys (Trust-On-First-Use).
+/// A production implementation should verify against known_hosts.
+private final class AcceptAllHostKeysDelegate: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+    func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+        // TODO: Implement known_hosts verification for production use.
+        // For now, accept all host keys (TOFU model).
+        validationCompletePromise.succeed(())
+    }
+}
+
+// MARK: - SSH Private Key Parsing
+
+/// Parse an SSH private key string into an NIOSSHPrivateKey.
+private func parseSSHPrivateKey(_ keyString: String) throws -> NIOSSHPrivateKey {
+    // Try Ed25519 first, then P256, then P384, then P521
+    if let key = try? NIOSSHPrivateKey(ed25519Key: .init(
+        rawRepresentation: parseOpenSSHPrivateKeyRaw(keyString))) {
+        return key
+    }
+    if let key = try? NIOSSHPrivateKey(p256Key: .init(
+        rawRepresentation: parseOpenSSHPrivateKeyRaw(keyString))) {
+        return key
+    }
+    if let key = try? NIOSSHPrivateKey(p384Key: .init(
+        rawRepresentation: parseOpenSSHPrivateKeyRaw(keyString))) {
+        return key
+    }
+    if let key = try? NIOSSHPrivateKey(p521Key: .init(
+        rawRepresentation: parseOpenSSHPrivateKeyRaw(keyString))) {
+        return key
+    }
+    throw SSHTransportError.authenticationFailed("Unsupported private key format")
+}
+
+/// Extract raw key bytes from an OpenSSH PEM-formatted key string.
+private func parseOpenSSHPrivateKeyRaw(_ pem: String) throws -> Data {
+    let lines = pem.components(separatedBy: .newlines)
+        .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+    let base64 = lines.joined()
+    guard let data = Data(base64Encoded: base64) else {
+        throw SSHTransportError.authenticationFailed("Invalid key encoding")
+    }
+    return data
+}
+
+/// Extract raw key bytes from a passphrase-protected key.
+private func parsePrivateKeyBytes(_ pem: String, passphrase: String) throws -> Data {
+    // NIOSSH doesn't natively support encrypted keys.
+    // For encrypted keys, we'd need additional crypto, which is out of scope
+    // for the initial implementation.
+    _ = passphrase
+    return try parseOpenSSHPrivateKeyRaw(pem)
+}
+
+// MARK: - SSHTransport
+
+/// SSH transport that connects to a remote Neovim instance over SSH
+/// using Apple's NIOSSH library.
 ///
 /// ## Architecture
 ///
 /// ```
 /// SSHTransport
 ///   ├─ NIOSSHClient (event loop, channel pipeline)
-///   │    ├─ Host key verification (known_hosts or Trust-On-First-Use)
-///   │    ├─ Authentication handler (agent / password / key file)
+///   │    ├─ Host key verification (AcceptAllHostKeysDelegate / TOFU)
+///   │    ├─ Authentication handler (password / key file / agent-like)
 ///   │    └─ Exec channel handler
 ///   │         ├─ stdin  → send(Data)
 ///   │         └─ stdout → received AsyncThrowingStream<Data, Error>
-///   └─ Reconnection logic (exponential backoff)
+///   └─ State management (connecting → authenticating → connected → disconnected)
 /// ```
-public final class SSHTransport: NvimTransport, @unchecked Sendable {
+public final class SSHTransport: @unchecked Sendable {
 
     /// The SSH connection configuration.
     public let config: SSHConnectionConfig
 
     /// Observable connection state.
-    public private(set) var state: SSHConnectionState = .disconnected
+    public private(set) var connectionState: SSHConnectionState = .disconnected
 
-    // MARK: - NvimTransport conformance
+    // NIO resources
+    private var group: MultiThreadedEventLoopGroup?
+    private var parentChannel: Channel?
+    private var execChannel: Channel?
 
-    /// The stream of data received from the remote Neovim process's stdout.
-    public var received: AsyncThrowingStream<Data, Error> {
-        // TODO: Return the real channel output stream once NIOSSH is integrated.
-        return AsyncThrowingStream { continuation in
-            continuation.finish(throwing: SSHTransportError.notImplemented)
-        }
-    }
+    // Data stream
+    private var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+    private let _dataStream: AsyncThrowingStream<Data, Error>
+
+    // State stream
+    private var stateContinuation: AsyncStream<TransportState>.Continuation?
+    private let _stateStream: AsyncStream<TransportState>
+    private var _transportState: TransportState = .idle
+
+    // Lock for thread-safe state access
+    private let lock = NSLock()
 
     public init(config: SSHConnectionConfig) {
         self.config = config
+
+        var dc: AsyncThrowingStream<Data, Error>.Continuation!
+        self._dataStream = AsyncThrowingStream { dc = $0 }
+        self.dataContinuation = dc
+
+        var sc: AsyncStream<TransportState>.Continuation!
+        self._stateStream = AsyncStream { sc = $0 }
+        self.stateContinuation = sc
     }
 
     /// Establish the SSH connection, authenticate, and exec the remote nvim process.
-    ///
-    /// Once implemented, this will:
-    /// 1. Resolve the hostname and connect a TCP socket via `NIOClientTCPBootstrap`.
-    /// 2. Add the `NIOSSHHandler` to the channel pipeline.
-    /// 3. Perform host key verification against `config.knownHostsPath`.
-    /// 4. Authenticate using the configured `SSHAuthentication` method.
-    /// 5. Open an exec channel running `config.remoteCommand`.
-    /// 6. Bridge the channel's inbound/outbound to `received` / `send(_:)`.
     public func start() async throws {
-        state = .connecting
-        // TODO: Implement NIOSSH connection setup.
-        //
-        // Rough implementation outline:
-        //
-        // let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        // let bootstrap = ClientBootstrap(group: group)
-        //     .channelInitializer { channel in
-        //         channel.pipeline.addHandlers([
-        //             NIOSSHHandler(
-        //                 role: .client(.init(
-        //                     userAuthDelegate: authDelegate,
-        //                     serverAuthDelegate: hostKeyVerifier
-        //                 )),
-        //                 allocator: channel.allocator,
-        //                 inboundChildChannelInitializer: nil
-        //             )
-        //         ])
-        //     }
-        //
-        // let channel = try await bootstrap.connect(
-        //     host: config.host,
-        //     port: Int(config.port)
-        // ).get()
-        //
-        // let execChannel = try await channel.pipeline
-        //     .handler(type: NIOSSHHandler.self)
-        //     .flatMap { handler in
-        //         handler.createChannel(nil) { childChannel, channelType in
-        //             guard channelType == .session else { return childChannel.close() }
-        //             return childChannel.pipeline.addHandlers([
-        //                 ExecRequestHandler(command: config.remoteCommand),
-        //                 DataBridgeHandler(continuation: streamContinuation)
-        //             ])
-        //         }
-        //     }.get()
+        lock.withLock {
+            guard _transportState == .idle else { return }
+            _transportState = .connecting
+        }
+        stateContinuation?.yield(.connecting)
+        connectionState = .connecting
 
-        state = .failed("SSH transport not yet implemented")
-        throw SSHTransportError.notImplemented
+        let elg = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.group = elg
+
+        let authDelegate = ClientAuthDelegate(
+            username: config.username,
+            authentication: config.authentication
+        )
+        let hostKeyDelegate = AcceptAllHostKeysDelegate()
+
+        do {
+            connectionState = .authenticating
+
+            // Connect and set up SSH
+            let channel = try await ClientBootstrap(group: elg)
+                .channelOption(.socketOption(.so_reuseaddr), value: 1)
+                .channelInitializer { channel in
+                    channel.pipeline.addHandlers([
+                        NIOSSHHandler(
+                            role: .client(.init(
+                                userAuthDelegate: authDelegate,
+                                serverAuthDelegate: hostKeyDelegate
+                            )),
+                            allocator: channel.allocator,
+                            inboundChildChannelInitializer: nil
+                        )
+                    ])
+                }
+                .connectTimeout(.seconds(Int64(config.connectTimeout)))
+                .connect(host: config.host, port: Int(config.port))
+                .get()
+
+            self.parentChannel = channel
+
+            // Now open an exec channel for the remote nvim command
+            guard let sshHandler = try? await channel.pipeline.handler(type: NIOSSHHandler.self).get() else {
+                throw SSHTransportError.channelOpenFailed("Could not find SSH handler in pipeline")
+            }
+
+            guard let dc = dataContinuation else {
+                throw SSHTransportError.channelOpenFailed("Data stream not available")
+            }
+
+            let execHandler = ExecChannelHandler(continuation: dc)
+            let remoteCmd = config.remoteCommand
+
+            let childChannel: Channel = try await sshHandler.createChannel(nil) { childChannel, channelType in
+                guard channelType == .session else {
+                    return childChannel.eventLoop.makeFailedFuture(
+                        SSHTransportError.channelOpenFailed("Unexpected channel type")
+                    )
+                }
+                return childChannel.pipeline.addHandlers([
+                    execHandler,
+                    ExecCommandSender(command: remoteCmd)
+                ])
+            }.get()
+
+            self.execChannel = childChannel
+
+            lock.withLock { _transportState = .connected }
+            stateContinuation?.yield(.connected)
+            connectionState = .connected
+
+            // Monitor the exec channel for closure
+            childChannel.closeFuture.whenComplete { [weak self] _ in
+                guard let self else { return }
+                self.lock.withLock { self._transportState = .disconnected(nil) }
+                self.stateContinuation?.yield(.disconnected(nil))
+                self.dataContinuation?.finish()
+                self.connectionState = .disconnected
+            }
+
+        } catch {
+            let msg = error.localizedDescription
+            lock.withLock { _transportState = .disconnected(error) }
+            stateContinuation?.yield(.disconnected(error))
+            connectionState = .failed(msg)
+            dataContinuation?.finish(throwing: error)
+            try? await shutdown()
+            throw SSHTransportError.connectionFailed(msg)
+        }
     }
 
     /// Send data to the remote Neovim process's stdin.
     public func send(_ data: Data) async throws {
-        guard state == .connected else {
+        let state = lock.withLock { _transportState }
+        guard state == .connected, let channel = execChannel else {
             throw SSHTransportError.notConnected
         }
-        // TODO: Write `data` into the SSH exec channel's outbound buffer.
+
+        var buffer = channel.allocator.buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        try await channel.writeAndFlush(buffer)
     }
 
     /// Gracefully close the SSH connection.
     public func stop() async {
-        // TODO: Close the exec channel, then the SSH connection, then the event loop group.
-        state = .disconnected
+        let state = lock.withLock { _transportState }
+        guard state == .connected || state == .connecting else { return }
+
+        lock.withLock { _transportState = .disconnecting }
+        stateContinuation?.yield(.disconnecting)
+
+        // Close exec channel
+        if let exec = execChannel, exec.isActive {
+            try? await exec.close()
+        }
+
+        // Close parent SSH channel
+        if let parent = parentChannel, parent.isActive {
+            try? await parent.close()
+        }
+
+        try? await shutdown()
+
+        lock.withLock { _transportState = .disconnected(nil) }
+        stateContinuation?.yield(.disconnected(nil))
+        stateContinuation?.finish()
+        dataContinuation?.finish()
+        connectionState = .disconnected
+    }
+
+    /// The stream of data received from the remote Neovim process.
+    public var received: AsyncThrowingStream<Data, Error> { _dataStream }
+
+    /// An `AsyncStream` of transport state changes.
+    public var stateStream: AsyncStream<TransportState> { _stateStream }
+
+    /// The current transport state.
+    public var state: TransportState {
+        lock.withLock { _transportState }
+    }
+
+    private func shutdown() async throws {
+        try await group?.shutdownGracefully()
+        group = nil
+    }
+
+    deinit {
+        dataContinuation?.finish()
+        stateContinuation?.finish()
+        try? group?.syncShutdownGracefully()
+    }
+}
+
+// MARK: - Exec Command Sender
+
+/// A channel handler that sends the exec request once the channel is active.
+private final class ExecCommandSender: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = SSHChannelData
+
+    private let command: String
+
+    init(command: String) {
+        self.command = command
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        let request = SSHChannelRequestEvent.ExecRequest(
+            command: command,
+            wantReply: true
+        )
+        context.triggerUserOutboundEvent(request, promise: nil)
+        context.fireChannelActive()
+    }
+}
+
+// MARK: - NvimTransport Conformance
+
+extension SSHTransport: NvimTransport {
+    public var dataStream: AsyncThrowingStream<Data, Error> { received }
+
+    public func start() async throws {
+        // Calls the main start() implementation above
+        try await (self as SSHTransport).start()
     }
 }
 
@@ -185,7 +518,6 @@ public final class SSHTransport: NvimTransport, @unchecked Sendable {
 
 /// Errors specific to the SSH transport layer.
 public enum SSHTransportError: Error, LocalizedError, Sendable {
-    case notImplemented
     case notConnected
     case connectionFailed(String)
     case authenticationFailed(String)
@@ -195,8 +527,6 @@ public enum SSHTransportError: Error, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .notImplemented:
-            return "SSH transport is not yet implemented."
         case .notConnected:
             return "Not connected to the remote host."
         case .connectionFailed(let reason):

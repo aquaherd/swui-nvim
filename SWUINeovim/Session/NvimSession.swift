@@ -35,31 +35,11 @@ public enum NvimSessionState: Sendable, Equatable {
     }
 }
 
-// MARK: - Grid Cell
+// MARK: - Raw Highlight Attributes
 
-/// A single cell in the Neovim editor grid.
-public struct GridCell: Sendable, Equatable {
-    /// The text displayed in this cell (usually a single grapheme cluster,
-    /// but may be empty for continuation cells of wide characters).
-    public var text: String
-
-    /// Highlight attribute ID, referencing the highlight table.
-    public var highlightID: Int
-
-    /// Whether this cell is a double-width character's trailing cell.
-    public var isDoubleWidthTrailing: Bool
-
-    public init(text: String = " ", highlightID: Int = 0, isDoubleWidthTrailing: Bool = false) {
-        self.text = text
-        self.highlightID = highlightID
-        self.isDoubleWidthTrailing = isDoubleWidthTrailing
-    }
-}
-
-// MARK: - Highlight Attributes
-
-/// Resolved highlight attributes from `hl_attr_define`.
-public struct HighlightAttributes: Sendable, Equatable {
+/// Raw highlight attributes parsed from `hl_attr_define` msgpack data.
+/// Uses UInt32 color values before platform color resolution.
+public struct RawHighlightAttrs: Sendable, Equatable {
     public var foreground: UInt32?
     public var background: UInt32?
     public var special: UInt32?
@@ -105,8 +85,8 @@ public struct HighlightAttributes: Sendable, Equatable {
     }
 
     /// Parse highlight attributes from a Neovim `hl_attr_define` map.
-    public static func from(msgpack value: MsgPackValue) -> HighlightAttributes {
-        var attrs = HighlightAttributes()
+    public static func from(msgpack value: MsgPackValue) -> RawHighlightAttrs {
+        var attrs = RawHighlightAttrs()
         guard case .map(let dict) = value else { return attrs }
 
         for (key, val) in dict {
@@ -147,41 +127,8 @@ public struct HighlightAttributes: Sendable, Equatable {
     }
 }
 
-// MARK: - Cursor State
-
-/// Current cursor state in the grid.
-public struct CursorState: Sendable, Equatable {
-    public var gridID: Int
-    public var row: Int
-    public var col: Int
-
-    public init(gridID: Int = 1, row: Int = 0, col: Int = 0) {
-        self.gridID = gridID
-        self.row = row
-        self.col = col
-    }
-}
-
-// MARK: - Mode Info
-
-/// Neovim mode information from `mode_info_set` / `mode_change`.
-public struct ModeInfo: Sendable, Equatable {
-    public var name: String
-    public var shortName: String
-    public var cursorShape: CursorShape
-
-    public enum CursorShape: String, Sendable, Equatable {
-        case block
-        case horizontal
-        case vertical
-    }
-
-    public init(name: String = "normal", shortName: String = "n", cursorShape: CursorShape = .block) {
-        self.name = name
-        self.shortName = shortName
-        self.cursorShape = cursorShape
-    }
-}
+// NOTE: CursorState is defined in CursorRenderer.swift
+// NOTE: ModeInfo and CursorShape are defined in NvimUIEvents.swift
 
 // MARK: - Default Colors
 
@@ -485,14 +432,7 @@ public final class Grid: @unchecked Sendable {
 
 // MARK: - Multigrid Window Info
 
-/// The anchor corner for a floating window, controlling which corner of
-/// the float is placed at the anchor position.
-public enum FloatAnchor: String, Sendable, Equatable {
-    case northWest = "NW"
-    case northEast = "NE"
-    case southWest = "SW"
-    case southEast = "SE"
-}
+// NOTE: FloatAnchor is defined in NvimUIEvents.swift
 
 /// Position information for a multigrid window.
 public struct WindowPosition: Sendable, Equatable {
@@ -568,7 +508,7 @@ public final class NvimSession: ObservableObject {
 
     @Published public private(set) var state: NvimSessionState = .disconnected
     @Published public private(set) var grids: [Int: Grid] = [:]
-    @Published public private(set) var highlightTable: [Int: HighlightAttributes] = [:]
+    @Published public private(set) var highlightTable: [Int: RawHighlightAttrs] = [:]
     @Published public private(set) var defaultColors = DefaultColors()
     @Published public private(set) var cursor = CursorState()
     @Published public private(set) var currentMode = ModeInfo()
@@ -848,13 +788,13 @@ public final class NvimSession: ObservableObject {
 
     private func readLoop() async {
         guard let stream = transportDataStream else { return }
-        var buffer = Data()
+        var buffer = [UInt8]()
 
         do {
             for try await chunk in stream {
                 guard !Task.isCancelled else { break }
 
-                buffer.append(chunk)
+                buffer.append(contentsOf: chunk)
 
                 // Try to consume complete MsgPack values from the buffer
                 while !buffer.isEmpty {
@@ -1138,7 +1078,7 @@ public final class NvimSession: ObservableObject {
               let hlID = args[0].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        let attrs = HighlightAttributes.from(msgpack: args[1])
+        let attrs = RawHighlightAttrs.from(msgpack: args[1])
         highlightTable[hlID] = attrs
     }
 
@@ -1168,12 +1108,25 @@ public final class NvimSession: ObservableObject {
                 guard let keyStr = key.stringValue else { continue }
                 switch keyStr {
                 case "name":
-                    info.name = val.stringValue ?? "normal"
+                    info.name = val.stringValue ?? ""
                 case "short_name":
-                    info.shortName = val.stringValue ?? "n"
+                    info.shortName = val.stringValue ?? ""
                 case "cursor_shape":
-                    let shape = val.stringValue ?? "block"
-                    info.cursorShape = ModeInfo.CursorShape(rawValue: shape) ?? .block
+                    if let s = val.stringValue { info.cursorShape = CursorShape(from: s) }
+                case "cell_percentage":
+                    info.cellPercentage = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkwait":
+                    info.blinkwait = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkon":
+                    info.blinkon = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkoff":
+                    info.blinkoff = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "attr_id":
+                    info.attrID = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "attr_id_lm":
+                    info.attrIDLm = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "mouse_shape":
+                    info.mouseShape = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
                 default:
                     break
                 }
@@ -1515,10 +1468,10 @@ public enum NvimSessionError: Error, LocalizedError, Sendable {
 private final class BufferReader {
     struct IncompleteError: Error {}
 
-    let data: Data
+    let data: [UInt8]
     private(set) var offset: Int = 0
 
-    init(data: Data) {
+    init(data: [UInt8]) {
         self.data = data
     }
 

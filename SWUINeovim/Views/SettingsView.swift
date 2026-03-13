@@ -892,11 +892,7 @@ struct RenderingSettingsTab: View {
     }
 
     private var metalDeviceName: String {
-        #if canImport(Metal)
-        import Metal
-        #endif
-        // We can't import Metal conditionally in the computed property,
-        // so we use a runtime check.
+        // Runtime check for Metal device
         if let device = MTLCreateSystemDefaultDevice() {
             return device.name
         }

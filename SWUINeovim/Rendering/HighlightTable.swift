@@ -10,10 +10,8 @@ import CoreGraphics
 
 #if canImport(AppKit)
 import AppKit
-public typealias PlatformColor = NSColor
 #elseif canImport(UIKit)
 import UIKit
-public typealias PlatformColor = UIColor
 #endif
 
 // MARK: - HighlightAttributes

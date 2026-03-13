@@ -12,18 +12,14 @@ import QuartzCore
 
 #if os(macOS)
 import AppKit
-public typealias PlatformColor = NSColor
-public typealias PlatformFont = NSFont
 #else
 import UIKit
-public typealias PlatformColor = UIColor
-public typealias PlatformFont = UIFont
 #endif
 
-// MARK: - GridCell
+// MARK: - RenderCell
 
 /// A single cell in the Neovim grid.
-public struct GridCell: Equatable, Sendable {
+public struct RenderCell: Equatable, Sendable {
     /// The character displayed in this cell. May be empty for trailing
     /// cells of a wide (double-width) character.
     public var character: String
@@ -44,7 +40,7 @@ public struct GridCell: Equatable, Sendable {
 // MARK: - Highlight Attributes
 
 /// Resolved highlight attributes from Neovim's `hl_attr_define` events.
-public struct HighlightAttributes: Equatable, Sendable {
+public struct ResolvedHighlightAttrs: Equatable, Sendable {
     public var foreground: PlatformColor
     public var background: PlatformColor
     public var special: PlatformColor
@@ -103,7 +99,7 @@ public struct HighlightAttributes: Equatable, Sendable {
 
 // MARK: - CoreTextRenderer
 
-/// Renders a 2D grid of `GridCell` values into a `CGContext` using CoreText.
+/// Renders a 2D grid of `RenderCell` values into a `CGContext` using CoreText.
 ///
 /// The renderer maintains a font cascade and cell metrics. It draws one row
 /// at a time, grouping consecutive cells with the same highlight ID into
@@ -290,10 +286,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     ///   - context: The Core Graphics context to draw into.
     ///   - viewHeight: The total height of the view (needed for coordinate flipping).
     public func drawRow(
-        _ row: [GridCell],
+        _ row: [RenderCell],
         rowIndex: Int,
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         in context: CGContext,
         viewHeight: CGFloat
     ) {
@@ -350,9 +346,9 @@ public final class CoreTextRenderer: @unchecked Sendable {
     ///   - context: The Core Graphics context.
     ///   - viewHeight: The total height of the view.
     public func drawGrid(
-        _ grid: [[GridCell]],
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        _ grid: [[RenderCell]],
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         dirtyRows: Set<Int>? = nil,
         in context: CGContext,
         viewHeight: CGFloat
@@ -375,11 +371,11 @@ public final class CoreTextRenderer: @unchecked Sendable {
     // MARK: - Background Drawing
 
     private func drawBackgrounds(
-        row: [GridCell],
+        row: [RenderCell],
         rowIndex: Int,
         rowY: CGFloat,
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         in context: CGContext
     ) {
         var colIndex = 0
@@ -423,7 +419,7 @@ public final class CoreTextRenderer: @unchecked Sendable {
         let highlightID: Int
     }
 
-    private func buildTextRuns(from row: [GridCell]) -> [TextRun] {
+    private func buildTextRuns(from row: [RenderCell]) -> [TextRun] {
         var runs: [TextRun] = []
         var currentText = ""
         var startCol = 0
@@ -475,10 +471,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     }
 
     private func drawTextRuns(
-        row: [GridCell],
+        row: [RenderCell],
         rowY: CGFloat,
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         in context: CGContext
     ) {
         let runs = buildTextRuns(from: row)
@@ -512,10 +508,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     // MARK: - Decoration Drawing
 
     private func drawDecorations(
-        row: [GridCell],
+        row: [RenderCell],
         rowY: CGFloat,
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         in context: CGContext
     ) {
         var colIndex = 0
@@ -637,10 +633,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     /// This is called after text runs so backgrounds are already filled.
     /// CoreGraphics uses bottom-left origin so `rowY` is the bottom of the row.
     private func drawBoxDrawingCells(
-        row: [GridCell],
+        row: [RenderCell],
         rowY: CGFloat,
-        highlights: [Int: HighlightAttributes],
-        defaultAttrs: HighlightAttributes,
+        highlights: [Int: ResolvedHighlightAttrs],
+        defaultAttrs: ResolvedHighlightAttrs,
         in context: CGContext
     ) {
         let lightWidth: CGFloat = 1.0
@@ -819,7 +815,7 @@ public final class CoreTextRenderer: @unchecked Sendable {
 
     // MARK: - Font Resolution
 
-    private func resolveFont(for attrs: HighlightAttributes) -> PlatformFont {
+    private func resolveFont(for attrs: ResolvedHighlightAttrs) -> PlatformFont {
         switch (attrs.bold, attrs.italic) {
         case (true, true):
             return ctFontBoldItalic as PlatformFont
@@ -846,7 +842,7 @@ public final class CoreTextRenderer: @unchecked Sendable {
     public func drawCursor(
         column: Int,
         row: Int,
-        style: CursorStyle,
+        style: CursorVisualStyle,
         color: PlatformColor,
         context: CGContext,
         viewHeight: CGFloat
@@ -896,10 +892,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     }
 }
 
-// MARK: - CursorStyle
+// MARK: - CursorVisualStyle
 
 /// The visual style of the cursor.
-public enum CursorStyle: Sendable, Equatable, Hashable {
+public enum CursorVisualStyle: Sendable, Equatable, Hashable {
     /// A solid block covering the entire cell.
     case block
     /// A thin vertical bar at the left edge of the cell.

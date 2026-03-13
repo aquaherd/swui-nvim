@@ -70,7 +70,7 @@ struct TooltipOverlay: View {
     let cellSize: CGSize
 
     /// Highlight table for resolving highlight IDs to colors.
-    let highlightTable: [Int: HighlightAttributes]
+    let highlightTable: [Int: RawHighlightAttrs]
 
     /// Default foreground/background colors.
     let defaultColors: DefaultColors
