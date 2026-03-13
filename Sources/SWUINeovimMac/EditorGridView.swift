@@ -3,6 +3,8 @@ import SwiftUI
 import AppKit
 import CoreText
 import Carbon.HIToolbox
+import Metal
+import QuartzCore
 import SWUINeovim
 
 struct EditorGridViewRepresentable: NSViewRepresentable {
@@ -83,6 +85,14 @@ final class EditorGridNSView: NSView {
     private var windowBecameKeyObserver: NSObjectProtocol?
     private var windowResignedKeyObserver: NSObjectProtocol?
 
+    // MARK: - Metal Rendering
+
+    private var metalAtlas: MetalGlyphAtlas?
+    private var metalLayer: CAMetalLayer?
+    private var metalBenchmark = RenderBenchmark()
+    private var coreTextBenchmark = RenderBenchmark()
+    private var useMetalRenderer = false
+
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
 
@@ -91,6 +101,7 @@ final class EditorGridNSView: NSView {
         renderFont = font
         attrs = [.font: renderFont]
         refreshFallbackFontCandidates()
+        setupMetal()
     }
 
     required init?(coder: NSCoder) {
@@ -98,6 +109,29 @@ final class EditorGridNSView: NSView {
         renderFont = font
         attrs = [.font: renderFont]
         refreshFallbackFontCandidates()
+        setupMetal()
+    }
+
+    // MARK: - Metal Setup
+
+    private func setupMetal() {
+        guard let atlas = MetalGlyphAtlas() else {
+            NSLog("[EditorGridNSView] Failed to create MetalGlyphAtlas — using CoreText renderer")
+            return
+        }
+
+        self.metalAtlas = atlas
+
+        let layer = CAMetalLayer()
+        layer.device = atlas.device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        layer.isHidden = true
+
+        self.wantsLayer = true
+        self.layer?.addSublayer(layer)
+        self.metalLayer = layer
     }
 
     func setEditorFont(name: String, size: CGFloat) {
@@ -118,6 +152,8 @@ final class EditorGridNSView: NSView {
         renderFont = makeCascadedRenderFont(base: font)
         attrs = [.font: renderFont]
         lastReportedCellSize = nil
+        metalAtlas?.clearAtlas()
+        metalAtlas?.measureCellSize(font: font as CTFont)
         needsDisplay = true
         emitResizeIfNeeded()
     }
@@ -132,6 +168,7 @@ final class EditorGridNSView: NSView {
 
     override func layout() {
         super.layout()
+        metalLayer?.frame = bounds
         emitResizeIfNeeded()
     }
 
@@ -162,13 +199,40 @@ final class EditorGridNSView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let cellSize = measureCell()
+
+        // Decide whether to use Metal for this frame
+        let shouldMetal = metalAtlas?.shouldUseMetalRenderer(
+            columns: snapshot.cols, rows: snapshot.rows
+        ) ?? false
+
+        if shouldMetal, let atlas = metalAtlas, let layer = metalLayer {
+            drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
+            useMetalRenderer = true
+
+            // Draw cursor via CoreText on top of the Metal layer
+            if let cg = NSGraphicsContext.current?.cgContext {
+                drawCursor(in: cg, cellSize: cellSize)
+            }
+        } else {
+            // Hide metal layer when using CoreText
+            metalLayer?.isHidden = true
+            useMetalRenderer = false
+            drawWithCoreText(dirtyRect: dirtyRect, cellSize: cellSize)
+        }
+    }
+
+    // MARK: - CoreText Draw Path
+
+    private func drawWithCoreText(dirtyRect: NSRect, cellSize: CGSize) {
+        let startTime = CACurrentMediaTime()
+
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
 
         let bg = nsColor(rgb: snapshot.defaultBackground)
         cg.setFillColor(bg.cgColor)
         cg.fill(bounds)
 
-        let cellSize = measureCell()
         let textYOffset = max(0, floor((cellSize.height - font.boundingRectForFont.height) / 2.0))
 
         // 1) Draw cell backgrounds by highlight runs.
@@ -233,6 +297,119 @@ final class EditorGridNSView: NSView {
         drawBoxDrawingCharacters(in: cg, cellSize: cellSize)
 
         drawCursor(in: cg, cellSize: cellSize)
+
+        coreTextBenchmark.record(CACurrentMediaTime() - startTime)
+    }
+
+    // MARK: - Metal Draw Path
+
+    private func drawWithMetal(atlas: MetalGlyphAtlas, layer: CAMetalLayer, cellSize: CGSize) {
+        let startTime = CACurrentMediaTime()
+
+        // Update layer size to match view
+        let scale = window?.backingScaleFactor ?? 2.0
+        let drawableSize = CGSize(
+            width: bounds.width * scale,
+            height: bounds.height * scale
+        )
+        layer.frame = bounds
+        layer.drawableSize = drawableSize
+        layer.contentsScale = scale
+        layer.isHidden = false
+
+        // Update atlas cell metrics
+        atlas.measureCellSize(font: font as CTFont)
+
+        // Rasterise all visible glyphs and build instance buffer
+        let instances = buildMetalInstances(atlas: atlas, cellSize: cellSize)
+
+        guard let drawable = layer.nextDrawable() else { return }
+
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = drawable.texture
+        passDescriptor.colorAttachments[0].loadAction = .clear
+
+        // Clear to default background
+        let bgR = Float((snapshot.defaultBackground >> 16) & 0xFF) / 255.0
+        let bgG = Float((snapshot.defaultBackground >> 8) & 0xFF) / 255.0
+        let bgB = Float(snapshot.defaultBackground & 0xFF) / 255.0
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: Double(bgR), green: Double(bgG), blue: Double(bgB), alpha: 1.0
+        )
+        passDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let commandBuffer = atlas.commandQueue?.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+            return
+        }
+
+        atlas.draw(
+            instances: instances,
+            viewportSize: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height)),
+            renderEncoder: encoder
+        )
+
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+
+        metalBenchmark.record(CACurrentMediaTime() - startTime)
+    }
+
+    private func buildMetalInstances(atlas: MetalGlyphAtlas, cellSize: CGSize) -> [CellInstance] {
+        let ctFont = font as CTFont
+        var flatCells: [(glyph: GlyphKey, fg: (Float, Float, Float, Float), bg: (Float, Float, Float, Float))] = []
+        flatCells.reserveCapacity(snapshot.rows * snapshot.cols)
+
+        for row in 0..<snapshot.rows {
+            for col in 0..<snapshot.cols {
+                let cell = snapshot.cells[row][col]
+                let hlAttrs = snapshot.highlights[cell.highlightID]
+
+                // Resolve colors with reverse support
+                let fgRGB: UInt32
+                let bgRGB: UInt32
+                if hlAttrs?.reverse == true {
+                    fgRGB = hlAttrs?.background ?? snapshot.defaultBackground
+                    bgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                } else {
+                    fgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                    bgRGB = hlAttrs?.background ?? snapshot.defaultBackground
+                }
+
+                let fg = rgbToFloats(fgRGB)
+                let bg = rgbToFloats(bgRGB)
+
+                let text = cell.text
+                let glyphKey: GlyphKey
+                if text.isEmpty || text == " " || cell.isDoubleWidthContinuation {
+                    // Blank cell — no glyph
+                    glyphKey = GlyphKey(characters: "", bold: false, italic: false, fontSize: font.pointSize)
+                } else {
+                    let bold = hlAttrs?.bold ?? false
+                    let italic = hlAttrs?.italic ?? false
+                    glyphKey = GlyphKey(characters: text, bold: bold, italic: italic, fontSize: font.pointSize)
+
+                    // Ensure the glyph is in the atlas
+                    atlas.rasterise(glyphKey, font: ctFont)
+                }
+
+                flatCells.append((glyph: glyphKey, fg: fg, bg: bg))
+            }
+        }
+
+        return atlas.buildInstanceBuffer(
+            cells: flatCells,
+            columns: snapshot.cols,
+            rows: snapshot.rows
+        )
+    }
+
+    private func rgbToFloats(_ rgb: UInt32) -> (Float, Float, Float, Float) {
+        let r = Float((rgb >> 16) & 0xFF) / 255.0
+        let g = Float((rgb >> 8) & 0xFF) / 255.0
+        let b = Float(rgb & 0xFF) / 255.0
+        return (r, g, b, 1.0)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -756,6 +933,17 @@ final class EditorGridNSView: NSView {
             Task { @MainActor in
                 self?.updateCursorBlinkState()
             }
+        }
+    }
+
+    // MARK: - Benchmark Stats
+
+    /// Returns benchmark stats for the currently active renderer.
+    var renderStats: (renderer: String, avgMs: Double, p95Ms: Double, samples: Int) {
+        if useMetalRenderer {
+            return ("Metal", metalBenchmark.averageMs, metalBenchmark.p95Ms, metalBenchmark.sampleCount)
+        } else {
+            return ("CoreText", coreTextBenchmark.averageMs, coreTextBenchmark.p95Ms, coreTextBenchmark.sampleCount)
         }
     }
 

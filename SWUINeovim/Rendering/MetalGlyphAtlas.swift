@@ -126,8 +126,8 @@ final class MetalGlyphAtlas {
 
     // MARK: - Properties
 
-    private let device: MTLDevice
-    private let commandQueue: MTLCommandQueue?
+    let device: MTLDevice
+    let commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?
     private var atlasTexture: MTLTexture?
     private var config: GlyphAtlasConfig
@@ -325,19 +325,62 @@ final class MetalGlyphAtlas {
         context.setShouldSmoothFonts(true)
 
         // Draw the glyph in white (the shader will apply the actual foreground color)
-        let attributedString = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
-        CFAttributedStringReplaceString(attributedString, CFRangeMake(0, 0), key.characters as CFString)
-        let fullRange = CFRangeMake(0, CFAttributedStringGetLength(attributedString))
-        CFAttributedStringSetAttribute(attributedString, fullRange, kCTFontAttributeName, font)
-
-        let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
-        CFAttributedStringSetAttribute(attributedString, fullRange, kCTForegroundColorAttributeName, white)
-
-        let line = CTLineCreateWithAttributedString(attributedString)
+        //
+        // For box-drawing characters, use CGContext path drawing (shared with
+        // CoreTextRenderer) instead of CTLineDraw for pixel-perfect grid alignment.
         let ascent = CTFontGetAscent(font)
 
-        context.textPosition = CGPoint(x: 0, y: ascent)
-        CTLineDraw(line, context)
+        if let boxInfo = BoxDrawingLookup.info(for: key.characters) {
+            let cellRect = CGRect(x: 0, y: 0, width: CGFloat(glyphWidth), height: CGFloat(glyphHeight))
+            let cx = cellRect.midX
+            let cy = cellRect.midY
+            let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+
+            context.setStrokeColor(white)
+            context.setLineCap(.square)
+            context.setLineJoin(.miter)
+
+            let lightWidth: CGFloat = 1.0
+            let heavyWidth: CGFloat = 2.0
+            let w = boxInfo.heavy ? heavyWidth : lightWidth
+            context.setLineWidth(w)
+
+            if boxInfo.rounded {
+                BoxDrawingRenderer.drawRoundedCorner(
+                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
+                )
+            } else if boxInfo.dashed {
+                let dashLen = cellRect.width * 0.2
+                context.setLineDash(phase: 0, lengths: [dashLen, dashLen])
+                BoxDrawingRenderer.drawStraightSegments(
+                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
+                )
+                context.setLineDash(phase: 0, lengths: [])
+            } else if boxInfo.double {
+                let offset: CGFloat = 2.0
+                context.setLineWidth(lightWidth)
+                BoxDrawingRenderer.drawDoubleSegments(
+                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy, offset: offset
+                )
+            } else {
+                BoxDrawingRenderer.drawStraightSegments(
+                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
+                )
+            }
+        } else {
+            let attributedString = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
+            CFAttributedStringReplaceString(attributedString, CFRangeMake(0, 0), key.characters as CFString)
+            let fullRange = CFRangeMake(0, CFAttributedStringGetLength(attributedString))
+            CFAttributedStringSetAttribute(attributedString, fullRange, kCTFontAttributeName, font)
+
+            let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+            CFAttributedStringSetAttribute(attributedString, fullRange, kCTForegroundColorAttributeName, white)
+
+            let line = CTLineCreateWithAttributedString(attributedString)
+
+            context.textPosition = CGPoint(x: 0, y: ascent)
+            CTLineDraw(line, context)
+        }
 
         // Upload to the atlas texture
         let region = MTLRegion(
@@ -513,6 +556,195 @@ struct GridUniforms {
 
     /// Atlas texture size in pixels (width, height).
     var atlasSize: SIMD2<Float>
+}
+
+// MARK: - BoxDrawingRenderer (shared helpers)
+
+/// Standalone helpers for drawing box-drawing characters into any CGContext.
+/// Used by both `CoreTextRenderer` (direct on-screen drawing) and
+/// `MetalGlyphAtlas` (atlas bitmap rasterisation).
+///
+/// All methods use a **flipped** coordinate system where Y=0 is at the top
+/// and increases downward (matching the atlas context's flip transform).
+/// In this system: grid "up" = minY, grid "down" = maxY.
+enum BoxDrawingRenderer {
+
+    /// Draw straight line segments from the cell center to edges.
+    static func drawStraightSegments(
+        info: BoxDrawingLookup.Info,
+        in context: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat
+    ) {
+        if info.left {
+            context.move(to: CGPoint(x: cellRect.minX, y: cy))
+            context.addLine(to: CGPoint(x: cx, y: cy))
+            context.strokePath()
+        }
+        if info.right {
+            context.move(to: CGPoint(x: cx, y: cy))
+            context.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.strokePath()
+        }
+        if info.up {
+            // Flipped context: "up" in grid = toward minY
+            context.move(to: CGPoint(x: cx, y: cellRect.minY))
+            context.addLine(to: CGPoint(x: cx, y: cy))
+            context.strokePath()
+        }
+        if info.down {
+            // Flipped context: "down" in grid = toward maxY
+            context.move(to: CGPoint(x: cx, y: cy))
+            context.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.strokePath()
+        }
+    }
+
+    /// Draw double-line segments (two parallel lines per direction).
+    static func drawDoubleSegments(
+        info: BoxDrawingLookup.Info,
+        in context: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat,
+        offset: CGFloat
+    ) {
+        if info.left || info.right {
+            if info.left {
+                context.move(to: CGPoint(x: cellRect.minX, y: cy - offset))
+                context.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy - offset))
+                context.strokePath()
+                context.move(to: CGPoint(x: cellRect.minX, y: cy + offset))
+                context.addLine(to: CGPoint(x: info.right ? cellRect.maxX : cx, y: cy + offset))
+                context.strokePath()
+            }
+            if info.right && !info.left {
+                context.move(to: CGPoint(x: cx, y: cy - offset))
+                context.addLine(to: CGPoint(x: cellRect.maxX, y: cy - offset))
+                context.strokePath()
+                context.move(to: CGPoint(x: cx, y: cy + offset))
+                context.addLine(to: CGPoint(x: cellRect.maxX, y: cy + offset))
+                context.strokePath()
+            }
+        }
+        if info.up || info.down {
+            if info.up {
+                context.move(to: CGPoint(x: cx - offset, y: info.down ? cellRect.maxY : cy))
+                context.addLine(to: CGPoint(x: cx - offset, y: cellRect.minY))
+                context.strokePath()
+                context.move(to: CGPoint(x: cx + offset, y: info.down ? cellRect.maxY : cy))
+                context.addLine(to: CGPoint(x: cx + offset, y: cellRect.minY))
+                context.strokePath()
+            }
+            if info.down && !info.up {
+                context.move(to: CGPoint(x: cx - offset, y: cy))
+                context.addLine(to: CGPoint(x: cx - offset, y: cellRect.maxY))
+                context.strokePath()
+                context.move(to: CGPoint(x: cx + offset, y: cy))
+                context.addLine(to: CGPoint(x: cx + offset, y: cellRect.maxY))
+                context.strokePath()
+            }
+        }
+    }
+
+    /// Draw a rounded corner arc connecting two segments.
+    /// Uses flipped coordinates: Y=0 at top, increasing downward.
+    static func drawRoundedCorner(
+        info: BoxDrawingLookup.Info,
+        in context: CGContext,
+        cellRect: CGRect,
+        cx: CGFloat,
+        cy: CGFloat
+    ) {
+        let halfW = cellRect.width / 2
+        let halfH = cellRect.height / 2
+        let radius = min(halfW, halfH)
+
+        // In flipped context: minY = top, maxY = bottom
+        // Grid "up" = minY, grid "down" = maxY
+        if info.right && info.down {
+            // ╭ — from below (maxY) to right (maxX)
+            context.move(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.addLine(to: CGPoint(x: cx, y: cy + radius))
+            context.addArc(center: CGPoint(x: cx + radius, y: cy + radius),
+                           radius: radius,
+                           startAngle: .pi,
+                           endAngle: .pi * 1.5,
+                           clockwise: false)
+            context.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.strokePath()
+        } else if info.left && info.down {
+            // ╮ — from left (minX) to below (maxY)
+            context.move(to: CGPoint(x: cellRect.minX, y: cy))
+            context.addLine(to: CGPoint(x: cx - radius, y: cy))
+            context.addArc(center: CGPoint(x: cx - radius, y: cy + radius),
+                           radius: radius,
+                           startAngle: .pi * 1.5,
+                           endAngle: 0,
+                           clockwise: false)
+            context.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
+            context.strokePath()
+        } else if info.left && info.up {
+            // ╯ — from above (minY) to left (minX)
+            context.move(to: CGPoint(x: cx, y: cellRect.minY))
+            context.addLine(to: CGPoint(x: cx, y: cy - radius))
+            context.addArc(center: CGPoint(x: cx - radius, y: cy - radius),
+                           radius: radius,
+                           startAngle: 0,
+                           endAngle: .pi * 0.5,
+                           clockwise: false)
+            context.addLine(to: CGPoint(x: cellRect.minX, y: cy))
+            context.strokePath()
+        } else if info.right && info.up {
+            // ╰ — from right (maxX) to above (minY)
+            context.move(to: CGPoint(x: cellRect.maxX, y: cy))
+            context.addLine(to: CGPoint(x: cx + radius, y: cy))
+            context.addArc(center: CGPoint(x: cx + radius, y: cy - radius),
+                           radius: radius,
+                           startAngle: .pi * 0.5,
+                           endAngle: .pi,
+                           clockwise: false)
+            context.addLine(to: CGPoint(x: cx, y: cellRect.minY))
+            context.strokePath()
+        }
+    }
+}
+
+// MARK: - Render Timing
+
+/// Simple frame timing for benchmarking CoreText vs Metal rendering.
+struct RenderBenchmark {
+    private var frameTimes: [CFTimeInterval] = []
+    private let maxSamples = 120
+
+    /// Record a frame's render duration.
+    mutating func record(_ duration: CFTimeInterval) {
+        frameTimes.append(duration)
+        if frameTimes.count > maxSamples {
+            frameTimes.removeFirst(frameTimes.count - maxSamples)
+        }
+    }
+
+    /// Average frame time in milliseconds.
+    var averageMs: Double {
+        guard !frameTimes.isEmpty else { return 0 }
+        return (frameTimes.reduce(0, +) / Double(frameTimes.count)) * 1000
+    }
+
+    /// 95th percentile frame time in milliseconds.
+    var p95Ms: Double {
+        guard !frameTimes.isEmpty else { return 0 }
+        let sorted = frameTimes.sorted()
+        let idx = min(Int(Double(sorted.count) * 0.95), sorted.count - 1)
+        return sorted[idx] * 1000
+    }
+
+    /// Number of recorded samples.
+    var sampleCount: Int { frameTimes.count }
+
+    /// Reset all samples.
+    mutating func reset() { frameTimes.removeAll() }
 }
 
 // MARK: - Errors
