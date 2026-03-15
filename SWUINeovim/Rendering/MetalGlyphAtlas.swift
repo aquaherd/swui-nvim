@@ -23,87 +23,106 @@ import UIKit
 // MARK: - Glyph Key
 
 /// Identifies a unique glyph in the atlas by its character content and style.
-struct GlyphKey: Hashable, Sendable {
+public struct GlyphKey: Hashable, Sendable {
     /// The character(s) to render — may be a single Unicode scalar or a grapheme cluster.
-    let characters: String
+    public let characters: String
 
     /// Whether the glyph is bold.
-    let bold: Bool
+    public let bold: Bool
 
     /// Whether the glyph is italic.
-    let italic: Bool
+    public let italic: Bool
 
     /// Font size in points.
-    let fontSize: CGFloat
+    public let fontSize: CGFloat
+
+    public init(characters: String, bold: Bool, italic: Bool, fontSize: CGFloat) {
+        self.characters = characters
+        self.bold = bold
+        self.italic = italic
+        self.fontSize = fontSize
+    }
 }
 
 // MARK: - Atlas Entry
 
 /// Location of a rasterised glyph within the texture atlas.
-struct GlyphAtlasEntry: Sendable {
+public struct GlyphAtlasEntry: Sendable {
     /// Position in the atlas texture (pixels).
-    let x: UInt16
-    let y: UInt16
+    public let x: UInt16
+    public let y: UInt16
 
     /// Size of the glyph region in the atlas (pixels).
-    let width: UInt16
-    let height: UInt16
+    public let width: UInt16
+    public let height: UInt16
 
     /// Offset from the cell origin to the glyph origin (pixels).
-    let bearingX: Float
-    let bearingY: Float
+    public let bearingX: Float
+    public let bearingY: Float
 
     /// The advance width of the glyph (pixels).
-    let advance: Float
+    public let advance: Float
 }
 
 // MARK: - Cell Instance (GPU buffer element)
 
 /// Per-cell data uploaded to the GPU for instanced rendering.
 /// Matches the layout expected by `GlyphShader.metal`.
-struct CellInstance {
+public struct CellInstance {
     /// Position of this cell in the grid (column, row) — used to compute screen position.
-    var gridX: UInt16
-    var gridY: UInt16
+    public var gridX: UInt16
+    public var gridY: UInt16
 
     /// UV coordinates in the glyph atlas texture (normalised 0–1).
-    var uvX: Float
-    var uvY: Float
-    var uvWidth: Float
-    var uvHeight: Float
+    public var uvX: Float
+    public var uvY: Float
+    public var uvWidth: Float
+    public var uvHeight: Float
 
     /// Foreground color (linear RGB, premultiplied alpha).
-    var fgR: Float
-    var fgG: Float
-    var fgB: Float
-    var fgA: Float
+    public var fgR: Float
+    public var fgG: Float
+    public var fgB: Float
+    public var fgA: Float
 
     /// Background color (linear RGB, premultiplied alpha).
-    var bgR: Float
-    var bgG: Float
-    var bgB: Float
-    var bgA: Float
+    public var bgR: Float
+    public var bgG: Float
+    public var bgB: Float
+    public var bgA: Float
 }
 
 // MARK: - Atlas Configuration
 
 /// Configuration for the glyph atlas.
-struct GlyphAtlasConfig: Sendable {
+public struct GlyphAtlasConfig: Sendable {
     /// Width and height of the atlas texture in pixels.
     /// Must be a power of two for best GPU compatibility.
-    var atlasSize: Int = 2048
+    public var atlasSize: Int = 2048
 
     /// Maximum number of unique glyphs cached in the atlas.
     /// When exceeded, the atlas is rebuilt from scratch with only
     /// the glyphs visible in the current grid.
-    var maxGlyphs: Int = 4096
+    public var maxGlyphs: Int = 4096
 
     /// Grid cell size threshold (columns × rows) above which
     /// the Metal renderer is preferred over CoreText.
-    var cellCountThreshold: Int = 12_000 // ~200×60
+    public var cellCountThreshold: Int = 12_000 // ~200×60
 
     /// Whether to enable the Metal renderer regardless of grid size.
-    var forceEnabled: Bool = false
+    public var forceEnabled: Bool = false
+
+    public init(
+        atlasSize: Int = 2048,
+        maxGlyphs: Int = 4096,
+        cellCountThreshold: Int = 12_000,
+        forceEnabled: Bool = false
+    ) {
+        self.atlasSize = atlasSize
+        self.maxGlyphs = maxGlyphs
+        self.cellCountThreshold = cellCountThreshold
+        self.forceEnabled = forceEnabled
+    }
 }
 
 // MARK: - MetalGlyphAtlas
@@ -122,12 +141,12 @@ struct GlyphAtlasConfig: Sendable {
 ///
 /// The atlas is lazily populated. When it runs out of space, it is
 /// cleared and repopulated with only the currently visible glyphs.
-final class MetalGlyphAtlas {
+public final class MetalGlyphAtlas {
 
     // MARK: - Properties
 
-    let device: MTLDevice
-    let commandQueue: MTLCommandQueue?
+    public let device: MTLDevice
+    public let commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?
     private var atlasTexture: MTLTexture?
     private var config: GlyphAtlasConfig
@@ -141,11 +160,11 @@ final class MetalGlyphAtlas {
     private var rowHeight: Int = 0
 
     /// Whether the atlas has been set up and is ready for rendering.
-    private(set) var isAvailable: Bool = false
+    public private(set) var isAvailable: Bool = false
 
     /// The cell size in points (set after the first font measurement).
-    private(set) var cellWidth: CGFloat = 0
-    private(set) var cellHeight: CGFloat = 0
+    public private(set) var cellWidth: CGFloat = 0
+    public private(set) var cellHeight: CGFloat = 0
 
     // MARK: - Init
 
@@ -154,7 +173,7 @@ final class MetalGlyphAtlas {
     /// - Parameters:
     ///   - device: The `MTLDevice` to use for texture and pipeline creation.
     ///   - config: Atlas configuration (texture size, thresholds, etc.).
-    init?(device: MTLDevice? = MTLCreateSystemDefaultDevice(), config: GlyphAtlasConfig = .init()) {
+    public init?(device: MTLDevice? = MTLCreateSystemDefaultDevice(), config: GlyphAtlasConfig = .init()) {
         guard let device else {
             return nil
         }
@@ -177,7 +196,7 @@ final class MetalGlyphAtlas {
     }
 
     /// Whether the Metal renderer should be used for the given grid dimensions.
-    func shouldUseMetalRenderer(columns: Int, rows: Int) -> Bool {
+    public func shouldUseMetalRenderer(columns: Int, rows: Int) -> Bool {
         guard isAvailable else { return false }
         if config.forceEnabled { return true }
         return columns * rows >= config.cellCountThreshold
@@ -245,7 +264,7 @@ final class MetalGlyphAtlas {
     ///
     /// Should be called whenever the font changes. All glyphs are rasterised
     /// into cells of this size.
-    func measureCellSize(font: CTFont) {
+    public func measureCellSize(font: CTFont) {
         let spaceGlyph: [CGGlyph] = [CTFontGetGlyphWithName(font, "space" as CFString)]
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(font, .horizontal, spaceGlyph, &advance, 1)
@@ -261,7 +280,7 @@ final class MetalGlyphAtlas {
     ///   - font: The CTFont to use for rendering.
     /// - Returns: The atlas entry for the glyph, or `nil` if rasterisation failed.
     @discardableResult
-    func rasterise(_ key: GlyphKey, font: CTFont) -> GlyphAtlasEntry? {
+    public func rasterise(_ key: GlyphKey, font: CTFont) -> GlyphAtlasEntry? {
         // Return cached entry if available
         if let existing = glyphCache[key] {
             return existing
@@ -415,7 +434,7 @@ final class MetalGlyphAtlas {
     }
 
     /// Clear all cached glyphs and reset the packing cursor.
-    func clearAtlas() {
+    public func clearAtlas() {
         glyphCache.removeAll(keepingCapacity: true)
         cursorX = 0
         cursorY = 0
@@ -431,7 +450,7 @@ final class MetalGlyphAtlas {
     ///   - columns: Number of columns in the grid.
     ///   - rows: Number of rows in the grid.
     /// - Returns: An array of `CellInstance` ready for upload to a Metal buffer.
-    func buildInstanceBuffer(
+    public func buildInstanceBuffer(
         cells: [(glyph: GlyphKey, fg: (Float, Float, Float, Float), bg: (Float, Float, Float, Float))],
         columns: Int,
         rows: Int
@@ -492,7 +511,7 @@ final class MetalGlyphAtlas {
     ///   - instances: The cell instance data (from ``buildInstanceBuffer``).
     ///   - viewportSize: The size of the drawable in pixels.
     ///   - renderEncoder: The active render command encoder.
-    func draw(
+    public func draw(
         instances: [CellInstance],
         viewportSize: SIMD2<Float>,
         renderEncoder: MTLRenderCommandEncoder
@@ -714,12 +733,14 @@ enum BoxDrawingRenderer {
 // MARK: - Render Timing
 
 /// Simple frame timing for benchmarking CoreText vs Metal rendering.
-struct RenderBenchmark {
+public struct RenderBenchmark {
     private var frameTimes: [CFTimeInterval] = []
     private let maxSamples = 120
 
+    public init() {}
+
     /// Record a frame's render duration.
-    mutating func record(_ duration: CFTimeInterval) {
+    public mutating func record(_ duration: CFTimeInterval) {
         frameTimes.append(duration)
         if frameTimes.count > maxSamples {
             frameTimes.removeFirst(frameTimes.count - maxSamples)
@@ -727,13 +748,13 @@ struct RenderBenchmark {
     }
 
     /// Average frame time in milliseconds.
-    var averageMs: Double {
+    public var averageMs: Double {
         guard !frameTimes.isEmpty else { return 0 }
         return (frameTimes.reduce(0, +) / Double(frameTimes.count)) * 1000
     }
 
     /// 95th percentile frame time in milliseconds.
-    var p95Ms: Double {
+    public var p95Ms: Double {
         guard !frameTimes.isEmpty else { return 0 }
         let sorted = frameTimes.sorted()
         let idx = min(Int(Double(sorted.count) * 0.95), sorted.count - 1)
@@ -741,10 +762,10 @@ struct RenderBenchmark {
     }
 
     /// Number of recorded samples.
-    var sampleCount: Int { frameTimes.count }
+    public var sampleCount: Int { frameTimes.count }
 
     /// Reset all samples.
-    mutating func reset() { frameTimes.removeAll() }
+    public mutating func reset() { frameTimes.removeAll() }
 }
 
 // MARK: - Errors

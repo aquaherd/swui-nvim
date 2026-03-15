@@ -90,28 +90,46 @@ struct SSHBookmarkEditorView: View {
         }
         .frame(width: 480, height: 420)
         .onAppear {
-            if let bm = bookmark {
-                name = bm.name
-                host = bm.host
-                port = String(bm.port)
-                username = bm.username
-                remoteCommand = bm.remoteCommand
-                if bm.useAgent {
-                    authType = .agent
-                } else if bm.privateKeyPath != nil {
-                    authType = .privateKey
-                    privateKeyPath = bm.privateKeyPath ?? ""
-                } else {
-                    authType = .password
-                }
-                // Load saved credential from keychain
-                if let saved = SSHKeychainHelper.load(forBookmarkID: bm.id) {
-                    if authType == .password {
-                        password = saved
-                    } else if authType == .privateKey {
-                        passphrase = saved
-                    }
-                }
+            populateFields(from: bookmark)
+        }
+        .onChange(of: bookmark?.id) { _, _ in
+            populateFields(from: bookmark)
+        }
+    }
+
+    private func populateFields(from bookmark: SSHBookmark?) {
+        name = ""
+        host = ""
+        port = "22"
+        username = ""
+        remoteCommand = "nvim --headless --embed"
+        authType = .agent
+        password = ""
+        privateKeyPath = ""
+        passphrase = ""
+
+        guard let bm = bookmark else { return }
+
+        name = bm.name
+        host = bm.host
+        port = String(bm.port)
+        username = bm.username
+        remoteCommand = bm.remoteCommand
+
+        if bm.useAgent {
+            authType = .agent
+        } else if bm.privateKeyPath != nil {
+            authType = .privateKey
+            privateKeyPath = bm.privateKeyPath ?? ""
+        } else {
+            authType = .password
+        }
+
+        if let saved = SSHKeychainHelper.load(forBookmarkID: bm.id) {
+            if authType == .password {
+                password = saved
+            } else if authType == .privateKey {
+                passphrase = saved
             }
         }
     }

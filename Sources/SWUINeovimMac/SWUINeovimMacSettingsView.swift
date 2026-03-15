@@ -11,7 +11,7 @@ struct SWUINeovimMacSettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var openFontPanelToken: Int = 0
     @State private var fontValidationMessage: String?
-    @State private var sshBookmarks: [SSHBookmark] = SSHBookmarkStore.load()
+    @StateObject private var bookmarkLibrary = SSHBookmarkLibrary.shared
     @State private var editingBookmark: SSHBookmark?
     @State private var showBookmarkEditor = false
 
@@ -97,8 +97,7 @@ struct SWUINeovimMacSettingsView: View {
                             .buttonStyle(.borderless)
                             Button(role: .destructive) {
                                 SSHKeychainHelper.delete(forBookmarkID: bookmark.id)
-                                sshBookmarks.removeAll { $0.id == bookmark.id }
-                                SSHBookmarkStore.save(sshBookmarks)
+                                SSHBookmarkStore.save(sshBookmarks.filter { $0.id != bookmark.id })
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -119,12 +118,13 @@ struct SWUINeovimMacSettingsView: View {
             SSHBookmarkEditorView(
                 bookmark: editingBookmark,
                 onSave: { bookmark in
+                    var updated = sshBookmarks
                     if let idx = sshBookmarks.firstIndex(where: { $0.id == bookmark.id }) {
-                        sshBookmarks[idx] = bookmark
+                        updated[idx] = bookmark
                     } else {
-                        sshBookmarks.append(bookmark)
+                        updated.append(bookmark)
                     }
-                    SSHBookmarkStore.save(sshBookmarks)
+                    SSHBookmarkStore.save(updated)
                     showBookmarkEditor = false
                 },
                 onCancel: {
@@ -132,6 +132,13 @@ struct SWUINeovimMacSettingsView: View {
                 }
             )
         }
+        .onAppear {
+            bookmarkLibrary.reload()
+        }
+    }
+
+    private var sshBookmarks: [SSHBookmark] {
+        bookmarkLibrary.bookmarks
     }
 }
 

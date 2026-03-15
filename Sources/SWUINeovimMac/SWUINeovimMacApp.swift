@@ -8,9 +8,17 @@ import AppKit
 @main
 struct SWUINeovimMacApp: App {
     var body: some Scene {
-        WindowGroup("SWUINeovimMac") {
+        WindowGroup("SWUINeovimMac", id: "local-session") {
             SWUINeovimMacRootView()
             .frame(minWidth: 900, minHeight: 600)
+        }
+        .commands {
+            SWUINeovimMacCommands()
+        }
+
+        WindowGroup("Remote Session", for: SSHWindowLaunch.self) { launch in
+            SWUINeovimMacRootView(initialLaunch: launch.wrappedValue)
+                .frame(minWidth: 900, minHeight: 600)
         }
 
         Settings {
@@ -19,28 +27,108 @@ struct SWUINeovimMacApp: App {
     }
 }
 
+private struct SSHWindowLaunch: Codable, Hashable, Identifiable {
+    enum Mode: String, Codable, Hashable {
+        case connectSheet
+        case directConnection
+    }
+
+    let id: UUID
+    let mode: Mode
+    let config: SSHConnectionConfig?
+
+    static func connectSheet() -> SSHWindowLaunch {
+        SSHWindowLaunch(id: UUID(), mode: .connectSheet, config: nil)
+    }
+
+    static func direct(_ config: SSHConnectionConfig) -> SSHWindowLaunch {
+        SSHWindowLaunch(id: UUID(), mode: .directConnection, config: config)
+    }
+}
+
+private struct SWUINeovimMacCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var bookmarkLibrary = SSHBookmarkLibrary.shared
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Window") {
+                openWindow(id: "local-session")
+            }
+            .keyboardShortcut("n", modifiers: .command)
+
+            Button("New SSH Session…") {
+                openWindow(value: SSHWindowLaunch.connectSheet())
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+
+            if !bookmarkLibrary.bookmarks.isEmpty {
+                Divider()
+
+                ForEach(bookmarkLibrary.bookmarks) { bookmark in
+                    Button("Connect to \(bookmark.name)") {
+                        openBookmark(bookmark)
+                    }
+                }
+            }
+
+            Divider()
+        }
+    }
+
+    private func openBookmark(_ bookmark: SSHBookmark) {
+        do {
+            openWindow(value: SSHWindowLaunch.direct(try SSHBookmarkStore.makeConfig(for: bookmark)))
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "SSH Bookmark Error"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
+    }
+}
+
 private struct SWUINeovimMacRootView: View {
     @Environment(\.colorScheme) private var colorScheme
+    let initialLaunch: SSHWindowLaunch?
+
     @State private var controller = MacSessionController()
-    @State private var didAutoConnect: Bool = false
+    @State private var didInitializeSession: Bool = false
     @State private var showSSHConnect: Bool = false
-    @State private var sshError: String?
+    @State private var window: NSWindow?
     @AppStorage("swuineovim.nvimPath") private var nvimPath: String = "/opt/local/bin/nvim"
     @AppStorage("swuineovim.editorFontName") private var editorFontName: String = "Menlo-Regular"
     @AppStorage("swuineovim.editorFontSize") private var editorFontSize: Double = 14
 
+    init(initialLaunch: SSHWindowLaunch? = nil) {
+        self.initialLaunch = initialLaunch
+    }
+
     var body: some View {
         #if os(macOS)
         let cellSize = computeCellSize(fontName: editorFontName, fontSize: CGFloat(editorFontSize))
+        let flushRevision = controller.flushRevision
+        let gridSnapshot = controller.gridSnapshot
 
         ZStack(alignment: .topLeading) {
             // Layer 1: Editor surface
             EditorGridViewRepresentable(
                 controller: controller,
+                snapshot: gridSnapshot,
                 fontName: editorFontName,
                 fontSize: editorFontSize
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !gridSnapshot.layers.isEmpty {
+                MultigridOverlayView(
+                    snapshot: gridSnapshot,
+                    cellSize: cellSize,
+                    fontName: editorFontName,
+                    fontSize: editorFontSize
+                )
+            }
 
             // Layer 2: Popup menu overlay
             if controller.session.popupMenu.isVisible {
@@ -49,6 +137,8 @@ private struct SWUINeovimMacRootView: View {
                     cellSize: cellSize,
                     defaultFG: controller.session.defaultColors.foreground,
                     defaultBG: controller.session.defaultColors.background,
+                    gridOrigins: gridSnapshot.gridOrigins,
+                    preferBottomAnchor: controller.session.cmdline.isVisible,
                     onSelect: { index in
                         let delta = index - controller.session.popupMenu.selectedIndex
                         if delta > 0 {
@@ -92,7 +182,14 @@ private struct SWUINeovimMacRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
+            Color.clear
+                .opacity(flushRevision.isMultiple(of: 2) ? 0 : 0)
+                .allowsHitTesting(false)
+        )
+        .background(
             WindowAccessor { window in
+                self.window = window
+                updateWindowTitle(window)
                 controller.onRemoteExit = { [weak window] in
                     Task { @MainActor in
                         window?.close()
@@ -107,13 +204,34 @@ private struct SWUINeovimMacRootView: View {
                 controller.nvimPath = nvimPath
                 controller.updateAppearance(isDark: isSystemDarkMode())
 
-                if !didAutoConnect {
-                    didAutoConnect = true
-                    controller.connectLocal()
+                if !didInitializeSession {
+                    didInitializeSession = true
+
+                    switch initialLaunch?.mode {
+                    case .connectSheet:
+                        showSSHConnect = true
+                    case .directConnection:
+                        if let config = initialLaunch?.config {
+                            controller.connectSSH(config: config)
+                        } else {
+                            controller.connectLocal()
+                        }
+                    case nil:
+                        controller.connectLocal()
+                    }
                 }
             }
             .onChange(of: nvimPath) { _, newPath in
                 controller.nvimPath = newPath
+            }
+            .onChange(of: controller.session.title) { _, _ in
+                updateWindowTitle(window)
+            }
+            .onChange(of: controller.currentSSHConfig) { _, _ in
+                updateWindowTitle(window)
+            }
+            .onChange(of: controller.sshConnectionState) { _, _ in
+                updateWindowTitle(window)
             }
             .onChange(of: colorScheme) { _, newScheme in
                 controller.updateAppearance(isDark: newScheme == .dark)
@@ -126,30 +244,22 @@ private struct SWUINeovimMacRootView: View {
                 SSHConnectView(
                     onConnect: { config in
                         showSSHConnect = false
-                        controller.disconnect()
                         controller.nvimPath = nvimPath
                         controller.updateAppearance(isDark: isSystemDarkMode())
                         controller.connectSSH(config: config)
                     },
                     onCancel: {
                         showSSHConnect = false
+
+                        if initialLaunch?.mode == .connectSheet,
+                           controller.session.state == .disconnected,
+                           !controller.isSSH {
+                            Task { @MainActor in
+                                window?.close()
+                            }
+                        }
                     }
                 )
-            }
-            .toolbar {
-                ToolbarItem(placement: .automatic) {
-                    HStack(spacing: 8) {
-                        if let sshState = controller.sshConnectionState {
-                            sshStatusView(sshState)
-                        }
-                        Button {
-                            showSSHConnect = true
-                        } label: {
-                            Label("SSH", systemImage: "network")
-                        }
-                        .help("Connect to remote Neovim via SSH")
-                    }
-                }
             }
         #else
         EmptyView()
@@ -164,35 +274,23 @@ private struct SWUINeovimMacRootView: View {
         return best == .darkAqua
     }
 
-    @ViewBuilder
-    private func sshStatusView(_ state: SSHConnectionState) -> some View {
-        switch state {
-        case .connecting, .authenticating:
-            HStack(spacing: 4) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Connecting…")
-                    .font(.caption)
-            }
-        case .connected:
-            HStack(spacing: 4) {
-                Image(systemName: "bolt.fill")
-                    .foregroundStyle(.green)
-                Text("SSH")
-                    .font(.caption)
-            }
-        case .failed(let msg):
-            HStack(spacing: 4) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                Text(msg)
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-        case .disconnected:
-            EmptyView()
+    private func updateWindowTitle(_ window: NSWindow?) {
+        guard let window else { return }
+
+        let nvimTitle = controller.session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let config = controller.currentSSHConfig {
+            let endpoint = sshEndpointTitle(config)
+            window.title = nvimTitle.isEmpty ? endpoint : "\(nvimTitle) — \(endpoint)"
+        } else {
+            window.title = nvimTitle.isEmpty ? "SWUINeovimMac" : nvimTitle
         }
     }
+
+    private func sshEndpointTitle(_ config: SSHConnectionConfig) -> String {
+        let portSuffix = config.port == 22 ? "" : ":\(config.port)"
+        return "\(config.username)@\(config.host)\(portSuffix)"
+    }
+
     #endif
 }
 

@@ -164,7 +164,8 @@ private final class ClientAuthDelegate: NIOSSHClientUserAuthenticationDelegate, 
             }
             attemptedMethods.insert("publicKey")
             do {
-                let keyData = try Data(contentsOf: URL(fileURLWithPath: path))
+                let resolvedPath = resolveUserPath(path)
+                let keyData = try Data(contentsOf: URL(fileURLWithPath: resolvedPath))
                 let keyString = String(decoding: keyData, as: UTF8.self)
                 let key: NIOSSHPrivateKey
                 if let passphrase {
@@ -230,6 +231,23 @@ private final class AcceptAllHostKeysDelegate: NIOSSHClientServerAuthenticationD
 }
 
 // MARK: - SSH Private Key Parsing
+
+private func resolveUserPath(_ path: String) -> String {
+    if path.hasPrefix("~/") {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return home + "/" + path.dropFirst(2)
+    }
+
+    if path == "~" {
+        return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    if path.hasPrefix("/") {
+        return path
+    }
+
+    return URL(fileURLWithPath: path, relativeTo: FileManager.default.homeDirectoryForCurrentUser).path
+}
 
 /// Parse an SSH private key string into an NIOSSHPrivateKey.
 private func parseSSHPrivateKey(_ keyString: String) throws -> NIOSSHPrivateKey {
@@ -380,8 +398,9 @@ public final class SSHTransport: @unchecked Sendable {
 
             let execHandler = ExecChannelHandler(continuation: dc)
             let remoteCmd = config.remoteCommand
+            let childChannelPromise = channel.eventLoop.makePromise(of: Channel.self)
 
-            let childChannel: Channel = try await sshHandler.createChannel(nil) { childChannel, channelType in
+            sshHandler.createChannel(childChannelPromise) { childChannel, channelType in
                 guard channelType == .session else {
                     return childChannel.eventLoop.makeFailedFuture(
                         SSHTransportError.channelOpenFailed("Unexpected channel type")
@@ -391,7 +410,9 @@ public final class SSHTransport: @unchecked Sendable {
                     execHandler,
                     ExecCommandSender(command: remoteCmd)
                 ])
-            }.get()
+            }
+
+            let childChannel = try await childChannelPromise.futureResult.get()
 
             self.execChannel = childChannel
 
@@ -507,11 +528,6 @@ private final class ExecCommandSender: ChannelInboundHandler, @unchecked Sendabl
 
 extension SSHTransport: NvimTransport {
     public var dataStream: AsyncThrowingStream<Data, Error> { received }
-
-    public func start() async throws {
-        // Calls the main start() implementation above
-        try await (self as SSHTransport).start()
-    }
 }
 
 // MARK: - Errors

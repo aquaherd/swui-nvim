@@ -25,10 +25,7 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
-            path: "Sources/Transport",
-            exclude: [
-                "LocalTransport.swift",
-            ]
+            path: "Sources/Transport"
         ),
         .testTarget(
             name: "TransportTests",

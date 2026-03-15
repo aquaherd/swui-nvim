@@ -523,6 +523,12 @@ public final class NvimSession: ObservableObject {
     @Published public private(set) var title: String = ""
     @Published public private(set) var isBusy: Bool = false
 
+    /// Whether the UI should attach with Neovim's multigrid extension.
+    ///
+    /// Renderers that only draw grid 1 should disable this so regular window
+    /// content is rendered onto the root grid instead of secondary grids.
+    public var usesMultigrid: Bool = true
+
     /// The number of grid columns to request from Neovim.
     public var requestedCols: Int = 80
 
@@ -598,21 +604,21 @@ public final class NvimSession: ObservableObject {
         guard state == .attached || state == .connecting else { return }
         state = .detaching
 
-        readTask?.cancel()
-        readTask = nil
-
-        // Fail all pending requests
-        let pending = pendingRequests
-        pendingRequests.removeAll()
-        for (_, continuation) in pending {
-            continuation.resume(throwing: NvimSessionError.sessionStopped)
-        }
-
         // Try to detach gracefully
         do {
             _ = try await rpcRequest(method: "nvim_ui_detach", params: [])
         } catch {
             // Best effort — transport may already be closed
+        }
+
+        readTask?.cancel()
+        readTask = nil
+
+        // Fail any requests still pending after detach/shutdown.
+        let pending = pendingRequests
+        pendingRequests.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: NvimSessionError.sessionStopped)
         }
 
         await transportStop?()
@@ -698,7 +704,7 @@ public final class NvimSession: ObservableObject {
     private func attachUI() async throws {
         let uiOptions: MsgPackValue = .map([
             .string("ext_linegrid"):  .bool(true),
-            .string("ext_multigrid"): .bool(true),
+            .string("ext_multigrid"): .bool(usesMultigrid),
             .string("ext_popupmenu"): .bool(true),
             .string("ext_cmdline"):   .bool(true),
             .string("ext_messages"):  .bool(true),

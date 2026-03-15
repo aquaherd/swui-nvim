@@ -55,6 +55,8 @@ struct PopupMenuOverlayView: View {
     let cellSize: CGSize
     let defaultFG: UInt32
     let defaultBG: UInt32
+    var gridOrigins: [Int: CGPoint] = [:]
+    var preferBottomAnchor: Bool = false
 
     /// Send input keys back to Neovim (for selecting items).
     var onSelect: ((Int) -> Void)?
@@ -113,8 +115,18 @@ struct PopupMenuOverlayView: View {
     }
 
     private func computePosition(in containerSize: CGSize) -> CGPoint {
-        let anchorX = CGFloat(state.col) * cellSize.width
-        let anchorY = CGFloat(state.row + 1) * cellSize.height // below the cursor row
+        if preferBottomAnchor && state.row == 0 && state.col == 0 {
+            let width = min(maxWidth, containerSize.width * 0.6)
+            let height = menuHeight
+            return CGPoint(
+                x: width / 2 + 12,
+                y: max(height / 2 + 12, containerSize.height - height / 2 - 56)
+            )
+        }
+
+        let gridOrigin = gridOrigins[state.gridID] ?? .zero
+        let anchorX = gridOrigin.x * cellSize.width + CGFloat(state.col) * cellSize.width
+        let anchorY = gridOrigin.y * cellSize.height + CGFloat(state.row + 1) * cellSize.height // below the cursor row
 
         let width = min(maxWidth, containerSize.width * 0.6)
         let height = menuHeight
@@ -131,7 +143,7 @@ struct PopupMenuOverlayView: View {
         }
         // If popup would go below the view, show it above the cursor
         if y + height / 2 > containerSize.height {
-            y = CGFloat(state.row) * cellSize.height - height / 2
+            y = gridOrigin.y * cellSize.height + CGFloat(state.row) * cellSize.height - height / 2
         }
 
         return CGPoint(x: x, y: y)
@@ -181,6 +193,194 @@ struct PopupMenuOverlayView: View {
         default: return .secondary
         }
     }
+}
+
+// MARK: - MultigridOverlayView
+
+struct MultigridOverlayView: View {
+    let snapshot: MacSessionController.GridSnapshot
+    let cellSize: CGSize
+    let fontName: String
+    let fontSize: Double
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(snapshot.layers) { layer in
+                if layer.id != 1 {
+                    MultigridLayerView(
+                        layer: layer,
+                        defaultFG: snapshot.defaultForeground,
+                        defaultBG: snapshot.defaultBackground,
+                        highlightTable: snapshot.highlights,
+                        fontName: fontName,
+                        fontSize: fontSize,
+                        cellSize: cellSize
+                    )
+                    .frame(
+                        width: CGFloat(layer.cols) * cellSize.width,
+                        height: CGFloat(layer.rows) * cellSize.height,
+                        alignment: .topLeading
+                    )
+                    .offset(
+                        x: CGFloat(layer.originCol) * cellSize.width,
+                        y: CGFloat(layer.originRow) * cellSize.height
+                    )
+                }
+            }
+
+            if let cursorLayer = cursorLayer {
+                cursorOverlay(in: cursorLayer)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var cursorLayer: MacSessionController.GridSnapshot.Layer? {
+        snapshot.layers.first(where: { $0.id == snapshot.cursorGridID })
+    }
+
+    @ViewBuilder
+    private func cursorOverlay(in layer: MacSessionController.GridSnapshot.Layer) -> some View {
+        let rect = CGRect(
+            x: (CGFloat(layer.originCol) + CGFloat(snapshot.cursorCol)) * cellSize.width,
+            y: (CGFloat(layer.originRow) + CGFloat(snapshot.cursorRow)) * cellSize.height,
+            width: cellSize.width,
+            height: cellSize.height
+        )
+
+        if snapshot.useIBeamCursor {
+            Rectangle()
+                .fill(Color(red: 0x7A / 255.0, green: 0xA2 / 255.0, blue: 0xF7 / 255.0))
+                .frame(width: 2, height: max(1, rect.height - 2))
+                .offset(x: rect.minX + 1, y: rect.minY + 1)
+        } else {
+            Rectangle()
+                .fill(Color(red: 0x7A / 255.0, green: 0xA2 / 255.0, blue: 0xF7 / 255.0).opacity(0.45))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+}
+
+private struct MultigridLayerView: View {
+    let layer: MacSessionController.GridSnapshot.Layer
+    let defaultFG: UInt32
+    let defaultBG: UInt32
+    let highlightTable: [Int: RawHighlightAttrs]
+    let fontName: String
+    let fontSize: Double
+    let cellSize: CGSize
+
+    var body: some View {
+        let content = VStack(alignment: .leading, spacing: 0) {
+            ForEach(0..<layer.rows, id: \.self) { row in
+                MultigridRowView(
+                    cells: layer.cells[row],
+                    defaultFG: defaultFG,
+                    defaultBG: defaultBG,
+                    highlightTable: highlightTable,
+                    fontName: fontName,
+                    fontSize: fontSize,
+                    cellSize: cellSize
+                )
+            }
+        }
+        .background(color(rgb: defaultBG))
+
+        if layer.isFloating {
+            content
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5)
+                }
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+        } else {
+            content
+        }
+    }
+}
+
+private struct MultigridRowView: View {
+    let cells: [GridCell]
+    let defaultFG: UInt32
+    let defaultBG: UInt32
+    let highlightTable: [Int: RawHighlightAttrs]
+    let fontName: String
+    let fontSize: Double
+    let cellSize: CGSize
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(textRuns.enumerated()), id: \.offset) { _, run in
+                Text(run.text)
+                    .font(.custom(fontName, size: fontSize))
+                    .fontWeight(run.bold ? .bold : .regular)
+                    .italic(run.italic)
+                    .foregroundStyle(run.foreground)
+                    .background(run.background)
+                    .frame(width: CGFloat(run.cellCount) * cellSize.width, height: cellSize.height, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var textRuns: [MultigridTextRun] {
+        guard !cells.isEmpty else { return [] }
+
+        var runs: [MultigridTextRun] = []
+        var currentText = ""
+        var currentHL = cells[0].highlightID
+        var currentCount = 0
+
+        for cell in cells {
+            if cell.highlightID == currentHL {
+                currentText += cell.text
+                currentCount += 1
+            } else {
+                if !currentText.isEmpty {
+                    runs.append(makeRun(text: currentText, hlID: currentHL, cellCount: currentCount))
+                }
+                currentText = cell.text
+                currentHL = cell.highlightID
+                currentCount = 1
+            }
+        }
+
+        if !currentText.isEmpty {
+            runs.append(makeRun(text: currentText, hlID: currentHL, cellCount: currentCount))
+        }
+
+        return runs
+    }
+
+    private func makeRun(text: String, hlID: Int, cellCount: Int) -> MultigridTextRun {
+        let attrs = highlightTable[hlID]
+        var fg = color(rgb: attrs?.foreground ?? defaultFG)
+        var bg = color(rgb: attrs?.background ?? defaultBG)
+
+        if attrs?.reverse == true {
+            swap(&fg, &bg)
+        }
+
+        return MultigridTextRun(
+            text: text,
+            cellCount: cellCount,
+            foreground: fg,
+            background: bg,
+            bold: attrs?.bold ?? false,
+            italic: attrs?.italic ?? false
+        )
+    }
+}
+
+private struct MultigridTextRun {
+    let text: String
+    let cellCount: Int
+    let foreground: Color
+    let background: Color
+    let bold: Bool
+    let italic: Bool
 }
 
 // MARK: - CmdlineOverlayView

@@ -9,23 +9,25 @@ import SWUINeovim
 
 struct EditorGridViewRepresentable: NSViewRepresentable {
     let controller: MacSessionController
+    let snapshot: MacSessionController.GridSnapshot
     let fontName: String
     let fontSize: Double
 
     func makeNSView(context: Context) -> EditorGridNSView {
         let view = EditorGridNSView()
         view.setEditorFont(name: fontName, size: CGFloat(fontSize))
-        view.update(with: controller.gridSnapshot)
+        view.update(with: snapshot)
         view.sendInput = { keys in
             controller.sendInput(keys)
         }
-        view.sendMouseInput = { button, action, modifiers, row, col in
+        view.sendMouseInput = { button, action, modifiers, row, col, gridID in
             controller.sendMouse(
                 button: button,
                 action: action,
                 modifiers: modifiers,
                 row: row,
-                col: col
+                col: col,
+                gridID: gridID
             )
         }
         view.requestResize = { cols, rows in
@@ -35,21 +37,19 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: EditorGridNSView, context: Context) {
-        // Access flushRevision to ensure SwiftUI calls us on each flush
-        _ = controller.flushRevision
-
         nsView.setEditorFont(name: fontName, size: CGFloat(fontSize))
-        nsView.update(with: controller.gridSnapshot)
+        nsView.update(with: snapshot)
         nsView.sendInput = { keys in
             controller.sendInput(keys)
         }
-        nsView.sendMouseInput = { button, action, modifiers, row, col in
+        nsView.sendMouseInput = { button, action, modifiers, row, col, gridID in
             controller.sendMouse(
                 button: button,
                 action: action,
                 modifiers: modifiers,
                 row: row,
-                col: col
+                col: col,
+                gridID: gridID
             )
         }
         nsView.requestResize = { cols, rows in
@@ -60,7 +60,7 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
 
 final class EditorGridNSView: NSView {
     var sendInput: ((String) -> Void)?
-    var sendMouseInput: ((String, String, String, Int, Int) -> Void)?
+    var sendMouseInput: ((String, String, String, Int, Int, Int) -> Void)?
     var requestResize: ((Int, Int) -> Void)?
 
     private var snapshot = MacSessionController.GridSnapshot(
@@ -69,7 +69,9 @@ final class EditorGridNSView: NSView {
         cells: [[GridCell()]],
         cursorRow: 0,
         cursorCol: 0,
+        cursorGridID: 1,
         useIBeamCursor: false,
+        layers: [],
         defaultForeground: 0xFFFFFF,
         defaultBackground: 0x000000,
         highlights: [:]
@@ -474,6 +476,7 @@ final class EditorGridNSView: NSView {
     }
 
     private func drawCursor(in cg: CGContext, cellSize: CGSize) {
+        guard snapshot.drawBaseCursor else { return }
         if shouldBlinkCursor && !cursorBlinkVisible {
             return
         }
@@ -603,19 +606,49 @@ final class EditorGridNSView: NSView {
     ) {
         guard let cell = cellCoordinates(at: location) else { return }
         let modifiers = mouseModifierString(flags: flags)
-        sendMouseInput?(button, action, modifiers, cell.row, cell.col)
+        sendMouseInput?(button, action, modifiers, cell.row, cell.col, cell.gridID)
     }
 
-    private func cellCoordinates(at location: CGPoint) -> (row: Int, col: Int)? {
+    private func cellCoordinates(at location: CGPoint) -> (row: Int, col: Int, gridID: Int)? {
         let cell = measureCell()
         guard cell.width > 0, cell.height > 0 else { return nil }
+
+        for layer in snapshot.layers.sorted(by: { lhs, rhs in
+            if lhs.isFloating != rhs.isFloating {
+                return lhs.isFloating && !rhs.isFloating
+            }
+            if lhs.zIndex != rhs.zIndex {
+                return lhs.zIndex > rhs.zIndex
+            }
+            return lhs.id > rhs.id
+        }) {
+            let minX = CGFloat(layer.originCol) * cell.width
+            let minY = CGFloat(layer.originRow) * cell.height
+            let rect = CGRect(
+                x: minX,
+                y: minY,
+                width: CGFloat(layer.cols) * cell.width,
+                height: CGFloat(layer.rows) * cell.height
+            )
+            guard rect.contains(location) else { continue }
+
+            let col = Int(floor((location.x - rect.minX) / cell.width))
+            let row = Int(floor((location.y - rect.minY) / cell.height))
+            guard row >= 0, col >= 0 else { continue }
+            return (
+                row: min(max(0, row), max(0, layer.rows - 1)),
+                col: min(max(0, col), max(0, layer.cols - 1)),
+                gridID: layer.id
+            )
+        }
 
         let col = Int(floor(location.x / cell.width))
         let row = Int(floor(location.y / cell.height))
         guard row >= 0, col >= 0 else { return nil }
         return (
             row: min(max(0, row), max(0, snapshot.rows - 1)),
-            col: min(max(0, col), max(0, snapshot.cols - 1))
+            col: min(max(0, col), max(0, snapshot.cols - 1)),
+            gridID: 0
         )
     }
 

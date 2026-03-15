@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import Combine
 import SWUINeovim
 import Transport
 
@@ -29,6 +30,9 @@ final class MacSessionController {
     /// Current SSH connection state, if connected via SSH.
     private(set) var sshConnectionState: SSHConnectionState?
 
+    /// Active SSH configuration for the current remote session, if any.
+    private(set) var currentSSHConfig: SSHConnectionConfig?
+
     /// Whether we're currently connected via SSH.
     var isSSH: Bool { sshConnectionState != nil }
 
@@ -41,10 +45,28 @@ final class MacSessionController {
     private var lastSSHConfig: SSHConnectionConfig?
     private var reconnectAttempts: Int = 0
     private static let maxReconnectAttempts = 5
+    private var sessionStateCancellable: AnyCancellable?
+    private var hadLiveSession = false
 
     // MARK: - Init
 
     init() {
+        session.usesMultigrid = true
+        sessionStateCancellable = session.$state.sink { [weak self] newState in
+            guard let self else { return }
+
+            switch newState {
+            case .connecting, .attached, .detaching:
+                self.hadLiveSession = true
+            case .disconnected:
+                if self.hadLiveSession && !self.userInitiatedDisconnect {
+                    self.onRemoteExit?()
+                }
+                self.hadLiveSession = false
+            case .error:
+                break
+            }
+        }
         session.onFlush = { [weak self] in
             self?.flushRevision &+= 1
         }
@@ -64,15 +86,39 @@ final class MacSessionController {
 
     /// A lightweight snapshot of the current grid state for the NSView renderer.
     struct GridSnapshot: Sendable {
+        struct Layer: Sendable, Identifiable {
+            var id: Int
+            var rows: Int
+            var cols: Int
+            var cells: [[GridCell]]
+            var originRow: Double
+            var originCol: Double
+            var isFloating: Bool
+            var zIndex: Int
+            var focusable: Bool
+        }
+
         var rows: Int
         var cols: Int
         var cells: [[GridCell]]
         var cursorRow: Int
         var cursorCol: Int
+        var cursorGridID: Int
         var useIBeamCursor: Bool
+        var layers: [Layer]
         var defaultForeground: UInt32
         var defaultBackground: UInt32
         var highlights: [Int: RawHighlightAttrs]
+
+        var drawBaseCursor: Bool {
+            layers.isEmpty
+        }
+
+        var gridOrigins: [Int: CGPoint] {
+            Dictionary(uniqueKeysWithValues: layers.map {
+                ($0.id, CGPoint(x: $0.originCol, y: $0.originRow))
+            })
+        }
     }
 
     var gridSnapshot: GridSnapshot {
@@ -90,22 +136,126 @@ final class MacSessionController {
             cells: cells,
             cursorRow: session.cursor.row,
             cursorCol: session.cursor.col,
+            cursorGridID: session.cursor.gridID,
             useIBeamCursor: isInsertMode,
+            layers: windowLayers(),
             defaultForeground: session.defaultColors.foreground,
             defaultBackground: session.defaultColors.background,
             highlights: session.highlightTable
         )
     }
 
+    private func windowLayers() -> [GridSnapshot.Layer] {
+        let positions = session.windowPositions
+        let grids = session.grids
+
+        guard !positions.isEmpty else { return [] }
+
+        var cache: [Int: (row: Double, col: Double)] = [1: (0, 0)]
+
+        func resolveOrigin(for gridID: Int, visited: inout Set<Int>) -> (row: Double, col: Double)? {
+            if let cached = cache[gridID] {
+                return cached
+            }
+            guard !visited.contains(gridID) else { return nil }
+            visited.insert(gridID)
+            defer { visited.remove(gridID) }
+
+            guard let position = positions[gridID] else {
+                if gridID == 1 {
+                    return (0, 0)
+                }
+                return nil
+            }
+
+            let resolved: (row: Double, col: Double)
+            if position.isFloating {
+                let anchorGridID = position.anchorGridID ?? 1
+                let anchorOrigin = resolveOrigin(for: anchorGridID, visited: &visited) ?? (0, 0)
+                let anchorRow = anchorOrigin.row + (position.anchorRow ?? 0)
+                let anchorCol = anchorOrigin.col + (position.anchorCol ?? 0)
+                let grid = grids[gridID]
+                let height = Double(grid?.rows ?? position.height)
+                let width = Double(grid?.cols ?? position.width)
+
+                var originRow = anchorRow
+                var originCol = anchorCol
+
+                switch position.anchor {
+                case .northWest:
+                    break
+                case .northEast:
+                    originCol -= width
+                case .southWest:
+                    originRow -= height
+                case .southEast:
+                    originRow -= height
+                    originCol -= width
+                }
+
+                resolved = (originRow, originCol)
+            } else {
+                resolved = (Double(position.startRow), Double(position.startCol))
+            }
+
+            cache[gridID] = resolved
+            return resolved
+        }
+
+        var layers: [GridSnapshot.Layer] = []
+        for (gridID, position) in positions {
+            guard let grid = grids[gridID] else { continue }
+            var visited: Set<Int> = []
+            let origin = resolveOrigin(for: gridID, visited: &visited) ?? (0, 0)
+            layers.append(
+                GridSnapshot.Layer(
+                    id: gridID,
+                    rows: grid.rows,
+                    cols: grid.cols,
+                    cells: grid.cells,
+                    originRow: origin.row,
+                    originCol: origin.col,
+                    isFloating: position.isFloating,
+                    zIndex: position.zIndex,
+                    focusable: position.focusable
+                )
+            )
+        }
+
+        return layers.sorted {
+            if $0.isFloating != $1.isFloating {
+                return !$0.isFloating
+            }
+            if $0.zIndex != $1.zIndex {
+                return $0.zIndex < $1.zIndex
+            }
+            if $0.originRow != $1.originRow {
+                return $0.originRow < $1.originRow
+            }
+            if $0.originCol != $1.originCol {
+                return $0.originCol < $1.originCol
+            }
+            return $0.id < $1.id
+        }
+    }
+
     // MARK: - Connection Lifecycle
 
     func connectLocal() {
-        guard session.state == .disconnected else { return }
-        userInitiatedDisconnect = false
+        connectTask?.cancel()
         sshConnectionState = nil
+        currentSSHConfig = nil
 
         let path = nvimPath
         connectTask = Task {
+            if session.state != .disconnected {
+                userInitiatedDisconnect = true
+                await session.stop()
+            }
+
+            userInitiatedDisconnect = false
+            hadLiveSession = false
+
             let transport = LocalProcessRPCTransport(nvimPath: path)
             do {
                 try await transport.start()
@@ -131,18 +281,36 @@ final class MacSessionController {
 
     /// Connect to a remote Neovim instance over SSH.
     func connectSSH(config: SSHConnectionConfig) {
-        guard session.state == .disconnected else { return }
-        userInitiatedDisconnect = false
+        connectTask?.cancel()
         sshConnectionState = .connecting
+        currentSSHConfig = config
 
-        connectTask = Task {
+        connectTask = Task.detached(priority: .userInitiated) { [weak self, config] in
+            guard let self else { return }
+
+            if await self.session.state != .disconnected {
+                await MainActor.run {
+                    self.userInitiatedDisconnect = true
+                }
+                await self.session.stop()
+            }
+
+            await MainActor.run {
+                self.userInitiatedDisconnect = false
+                self.hadLiveSession = false
+                    self.currentSSHConfig = config
+                self.sshConnectionState = .connecting
+            }
+
             let transport = SSHRPCTransport(config: config)
             do {
-                sshConnectionState = .connecting
                 try await transport.start()
-                sshConnectionState = .connected
 
-                try await session.start(
+                await MainActor.run {
+                    self.sshConnectionState = .connected
+                }
+
+                try await self.session.start(
                     send: { data in try await transport.send(data) },
                     receive: transport.received,
                     stop: {
@@ -150,25 +318,48 @@ final class MacSessionController {
                     }
                 )
 
-                // Apply initial preferences
-                try? await session.command("set background=\(preferredBackground)")
+                let preferredBackground = await MainActor.run { self.preferredBackground }
+                let desiredResize = await MainActor.run { self.desiredResize }
+
+                try? await self.session.command("set background=\(preferredBackground)")
                 if let resize = desiredResize {
-                    try? await session.tryResize(width: resize.cols, height: resize.rows)
-                    lastAppliedResize = resize
+                    try? await self.session.tryResize(width: resize.cols, height: resize.rows)
+                    await MainActor.run {
+                        self.lastAppliedResize = resize
+                    }
                 }
 
             } catch {
-                sshConnectionState = .failed(error.localizedDescription)
+                let message = Self.describeSSHConnectError(error)
+                await MainActor.run {
+                    self.currentSSHConfig = config
+                    self.sshConnectionState = .failed(message)
+                }
             }
         }
     }
 
+    nonisolated private static func describeSSHConnectError(_ error: Error) -> String {
+        if let sshError = error as? SSHTransportError,
+           let description = sshError.errorDescription {
+            return description
+        }
+
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("channel error 9") {
+            return "SSH channel closed unexpectedly (NIO error 9). Check host, credentials, and remote command."
+        }
+        return message
+    }
+
     func disconnect() {
         userInitiatedDisconnect = true
+        hadLiveSession = false
         connectTask?.cancel()
         connectTask = nil
         lastAppliedResize = nil
         sshConnectionState = nil
+        currentSSHConfig = nil
 
         Task {
             await session.stop()
@@ -188,7 +379,8 @@ final class MacSessionController {
         action: String,
         modifiers: String,
         row: Int,
-        col: Int
+        col: Int,
+        gridID: Int = 0
     ) {
         Task {
             try? await session.inputMouse(
@@ -196,6 +388,7 @@ final class MacSessionController {
                 action: action,
                 row: max(0, row),
                 col: max(0, col),
+                gridID: gridID,
                 modifier: modifiers
             )
         }

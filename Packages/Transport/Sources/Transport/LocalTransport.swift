@@ -34,8 +34,12 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
     private var receivedContinuation: AsyncThrowingStream<Data, Error>.Continuation?
     private let _received: AsyncThrowingStream<Data, Error>
 
+    private var stateContinuation: AsyncStream<TransportState>.Continuation?
+    private let _stateStream: AsyncStream<TransportState>
+
     private let lock = NSLock()
     private var _isRunning = false
+    private var _state: TransportState = .idle
 
     public var isRunning: Bool {
         lock.withLock { _isRunning }
@@ -43,6 +47,18 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
 
     public var received: AsyncThrowingStream<Data, Error> {
         _received
+    }
+
+    public var dataStream: AsyncThrowingStream<Data, Error> {
+        _received
+    }
+
+    public var state: TransportState {
+        lock.withLock { _state }
+    }
+
+    public var stateStream: AsyncStream<TransportState> {
+        _stateStream
     }
 
     /// Creates a new local transport.
@@ -68,11 +84,29 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
             continuation = cont
         }
         self.receivedContinuation = continuation
+
+        var stateCont: AsyncStream<TransportState>.Continuation!
+        self._stateStream = AsyncStream { cont in
+            stateCont = cont
+        }
+        self.stateContinuation = stateCont
+    }
+
+    public convenience init(config: LocalTransportConfig) {
+        self.init(
+            nvimPath: config.nvimPath,
+            extraArguments: config.extraArguments,
+            environment: config.environment,
+            workingDirectory: config.workingDirectory.map(URL.init(fileURLWithPath:))
+        )
     }
 
     // MARK: - NvimTransport
 
     public func start() async throws {
+        lock.withLock { _state = .connecting }
+        stateContinuation?.yield(.connecting)
+
         process.executableURL = URL(fileURLWithPath: nvimPath)
         process.arguments = ["--embed"] + extraArguments
 
@@ -93,6 +127,8 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
             let data = handle.availableData
             guard !data.isEmpty else {
                 // EOF — nvim closed stdout
+                self?.lock.withLock { self?._state = .disconnected(nil) }
+                self?.stateContinuation?.yield(.disconnected(nil))
                 self?.receivedContinuation?.finish()
                 return
             }
@@ -117,21 +153,32 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
             self.lock.withLock { self._isRunning = false }
 
             if reason == .uncaughtSignal || status != 0 {
+                let error = LocalTransportError.processExited(
+                    status: status,
+                    reason: reason
+                )
+                self.lock.withLock { self._state = .disconnected(error) }
+                self.stateContinuation?.yield(.disconnected(error))
                 self.receivedContinuation?.finish(
-                    throwing: LocalTransportError.processExited(
-                        status: status,
-                        reason: reason
-                    )
+                    throwing: error
                 )
             } else {
+                self.lock.withLock { self._state = .disconnected(nil) }
+                self.stateContinuation?.yield(.disconnected(nil))
                 self.receivedContinuation?.finish()
             }
         }
 
         do {
             try process.run()
-            lock.withLock { _isRunning = true }
+            lock.withLock {
+                _isRunning = true
+                _state = .connected
+            }
+            stateContinuation?.yield(.connected)
         } catch {
+            lock.withLock { _state = .disconnected(error) }
+            stateContinuation?.yield(.disconnected(error))
             receivedContinuation?.finish(throwing: error)
             throw LocalTransportError.failedToLaunch(underlying: error)
         }
@@ -160,6 +207,9 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
     public func stop() async {
         guard isRunning else { return }
 
+        lock.withLock { _state = .disconnecting }
+        stateContinuation?.yield(.disconnecting)
+
         // Close stdin so nvim receives EOF and exits gracefully
         try? stdinPipe.fileHandleForWriting.close()
 
@@ -185,16 +235,21 @@ public final class LocalTransport: NvimTransport, @unchecked Sendable {
         }
 
         lock.withLock { _isRunning = false }
+        lock.withLock { _state = .disconnected(nil) }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
 
+        stateContinuation?.yield(.disconnected(nil))
+        stateContinuation?.finish()
         receivedContinuation?.finish()
     }
 
     deinit {
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
+        stateContinuation?.finish()
+        receivedContinuation?.finish()
         if process.isRunning {
             process.terminate()
         }

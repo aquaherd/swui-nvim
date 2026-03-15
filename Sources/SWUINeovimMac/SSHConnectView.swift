@@ -10,8 +10,9 @@ struct SSHConnectView: View {
     let onConnect: (SSHConnectionConfig) -> Void
     let onCancel: () -> Void
 
-    @State private var bookmarks: [SSHBookmark] = SSHBookmarkStore.load()
+    @StateObject private var bookmarkLibrary = SSHBookmarkLibrary.shared
     @State private var selectedBookmark: SSHBookmark?
+    @State private var errorMessage: String?
 
     // Quick connect fields
     @State private var host: String = ""
@@ -59,6 +60,14 @@ struct SSHConnectView: View {
                         .textContentType(.username)
                     SecureField("Password", text: $password)
                 }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                            .font(.footnote)
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -79,18 +88,28 @@ struct SSHConnectView: View {
             .padding()
         }
         .frame(width: 420, height: bookmarks.isEmpty ? 300 : 450)
+        .onAppear {
+            bookmarkLibrary.reload()
+            errorMessage = nil
+        }
+    }
+
+    private var bookmarks: [SSHBookmark] {
+        bookmarkLibrary.bookmarks
     }
 
     private func connectWithBookmark(_ bookmark: SSHBookmark) {
-        let savedCred = SSHKeychainHelper.load(forBookmarkID: bookmark.id)
-        let config = bookmark.toConnectionConfig(
-            password: savedCred,
-            passphrase: savedCred
-        )
-        onConnect(config)
+        errorMessage = nil
+
+        do {
+            onConnect(try SSHBookmarkStore.makeConfig(for: bookmark))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func quickConnect() {
+        errorMessage = nil
         let portNum = UInt16(port) ?? 22
         let auth: SSHAuthentication = password.isEmpty ? .agent : .password(password)
         let config = SSHConnectionConfig(
