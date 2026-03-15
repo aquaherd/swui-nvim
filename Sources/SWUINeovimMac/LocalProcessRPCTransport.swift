@@ -6,6 +6,7 @@ import NvimRPC
 actor LocalProcessRPCTransport: RPCTransport {
     private let nvimPath: String
     private let arguments: [String]
+    private let workingDirectory: URL
 
     private let process = Process()
     private let stdinPipe = Pipe()
@@ -23,6 +24,7 @@ actor LocalProcessRPCTransport: RPCTransport {
     ) {
         self.nvimPath = nvimPath
         self.arguments = arguments
+        self.workingDirectory = FileManager.default.homeDirectoryForCurrentUser
 
         var captured: AsyncThrowingStream<Data, Error>.Continuation?
         self.received = AsyncThrowingStream<Data, Error> { cont in
@@ -36,7 +38,7 @@ actor LocalProcessRPCTransport: RPCTransport {
 
         process.executableURL = URL(fileURLWithPath: nvimPath)
         process.arguments = arguments
-        var env = ProcessInfo.processInfo.environment
+        var env = Self.makeLaunchEnvironment(nvimPath: nvimPath)
         if (env["TERM"] ?? "").isEmpty {
             env["TERM"] = "xterm-256color"
         }
@@ -44,6 +46,7 @@ actor LocalProcessRPCTransport: RPCTransport {
             env["COLORTERM"] = "truecolor"
         }
         process.environment = env
+        process.currentDirectoryURL = workingDirectory
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -104,5 +107,43 @@ actor LocalProcessRPCTransport: RPCTransport {
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         isStarted = false
         finishStream()
+    }
+
+    private static func makeLaunchEnvironment(nvimPath: String) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if (env["HOME"] ?? "").isEmpty {
+            env["HOME"] = home
+        }
+
+        let nvimBinDir = URL(fileURLWithPath: nvimPath).deletingLastPathComponent().path
+        let fallbackEntries = [
+            nvimBinDir,
+            "/opt/local/bin",
+            "/opt/local/sbin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ]
+
+        let existingEntries = (env["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+
+        var mergedEntries: [String] = []
+        var seen = Set<String>()
+        for entry in existingEntries + fallbackEntries {
+            guard !entry.isEmpty, !seen.contains(entry) else { continue }
+            seen.insert(entry)
+            mergedEntries.append(entry)
+        }
+        env["PATH"] = mergedEntries.joined(separator: ":")
+
+        return env
     }
 }

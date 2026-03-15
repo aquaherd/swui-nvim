@@ -11,6 +11,19 @@ The project ships with shell-first release automation so you do not need Xcode f
 bash scripts/stage_swuineovimmac_app.sh release
 ```
 
+By default the staged app uses:
+
+- `CFBundleShortVersionString = 0.1.0`
+- `CFBundleVersion = $(git rev-list --count HEAD)` from the current checked out branch history
+
+Optional overrides:
+
+```bash
+export SWUINVIM_SHORT_VERSION="0.1.0"
+export SWUINVIM_BUILD_VERSION="123"
+bash scripts/stage_swuineovimmac_app.sh release
+```
+
 This creates:
 
 - `.build/arm64-apple-macosx/release/SWUINeovimMac.app`
