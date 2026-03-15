@@ -60,9 +60,20 @@ struct SWUINeovimMacSettingsView: View {
     private var generalTab: some View {
         Form {
             Section("Neovim") {
-                TextField("nvim path", text: $nvimPath)
-                    .textFieldStyle(.roundedBorder)
-                Text("Used for local --embed startup.")
+                HStack {
+                    TextField("", text: $nvimPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                    #if os(macOS)
+                    Button("Browse…") { browseForNvim() }
+                    #endif
+                }
+                if !nvimPath.isEmpty && !FileManager.default.isExecutableFile(atPath: nvimPath) {
+                    Text("File not found or not executable.")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                Text("Absolute path to the nvim binary for local --embed startup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -189,6 +200,20 @@ struct SWUINeovimMacSettingsView: View {
         .formStyle(.grouped)
         .padding(12)
     }
+
+    #if os(macOS)
+    private func browseForNvim() {
+        let panel = NSOpenPanel()
+        panel.title = "Select nvim Binary"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: nvimPath).deletingLastPathComponent()
+        if panel.runModal() == .OK, let url = panel.url {
+            nvimPath = url.path
+        }
+    }
+    #endif
 
     private var sshBookmarks: [SSHBookmark] {
         bookmarkLibrary.bookmarks

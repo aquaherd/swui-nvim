@@ -7,6 +7,26 @@ import AppKit
 
 @main
 struct SWUINeovimMacApp: App {
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "swuineovim.nvimPath": Self.resolvedNvimPath()
+        ])
+    }
+
+    /// Returns the first nvim binary found in the well-known install locations
+    /// for Homebrew (Apple Silicon and Intel) and MacPorts, falling back to the
+    /// Homebrew Apple Silicon path if none is found.
+    static func resolvedNvimPath() -> String {
+        let candidates = [
+            "/opt/homebrew/bin/nvim",   // Homebrew – Apple Silicon
+            "/usr/local/bin/nvim",      // Homebrew – Intel
+            "/opt/local/bin/nvim",      // MacPorts
+        ]
+        return candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        } ?? candidates[0]
+    }
+
     var body: some Scene {
         WindowGroup("SWUINeovimMac", id: "local-session") {
             SWUINeovimMacRootView()
