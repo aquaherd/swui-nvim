@@ -83,6 +83,9 @@ final class EditorGridNSView: NSView {
 
     private var font: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
     private var renderFont: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    private var renderFontBold: NSFont = .monospacedSystemFont(ofSize: 14, weight: .bold)
+    private var renderFontItalic: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    private var renderFontBoldItalic: NSFont = .monospacedSystemFont(ofSize: 14, weight: .bold)
     private var fallbackFontCandidates: [NSFont] = []
     private var attrs: [NSAttributedString.Key: Any] = [:]
     private var cursorBlinkTimer: Timer?
@@ -190,6 +193,9 @@ final class EditorGridNSView: NSView {
         font = resolved
         refreshFallbackFontCandidates()
         renderFont = makeCascadedRenderFont(base: font)
+        renderFontBold = makeCascadedRenderFont(base: styledVariant(of: font, traits: .bold))
+        renderFontItalic = makeCascadedRenderFont(base: styledVariant(of: font, traits: .italic))
+        renderFontBoldItalic = makeCascadedRenderFont(base: styledVariant(of: font, traits: [.bold, .italic]))
         attrs = [.font: renderFont]
         lastReportedCellSize = nil
         metalAtlas?.clearAtlas()
@@ -331,6 +337,16 @@ final class EditorGridNSView: NSView {
                 guard !cell.text.isEmpty, cell.text != " " else { continue }
                 if BoxDrawing.info(for: cell.text) != nil { continue }
                 let fg = foregroundColor(for: cell.highlightID)
+                let hlAttrs = snapshot.highlights[cell.highlightID]
+                let bold = hlAttrs?.bold ?? false
+                let italic = hlAttrs?.italic ?? false
+                let drawFont: NSFont
+                switch (bold, italic) {
+                case (true, true):  drawFont = renderFontBoldItalic
+                case (true, false): drawFont = renderFontBold
+                case (false, true): drawFont = renderFontItalic
+                default:            drawFont = renderFont
+                }
 
                 let cellRect = CGRect(
                     x: CGFloat(col) * cellSize.width,
@@ -348,7 +364,7 @@ final class EditorGridNSView: NSView {
                 (cell.text as NSString).draw(
                     at: point,
                     withAttributes: [
-                        .font: renderFont,
+                        .font: drawFont,
                         .foregroundColor: fg,
                     ]
                 )
@@ -420,7 +436,6 @@ final class EditorGridNSView: NSView {
     }
 
     private func buildMetalInstances(atlas: MetalGlyphAtlas, cellSize: CGSize) -> [CellInstance] {
-        let ctFont = font as CTFont
         var flatCells: [(glyph: GlyphKey, fg: (Float, Float, Float, Float), bg: (Float, Float, Float, Float))] = []
         flatCells.reserveCapacity(snapshot.rows * snapshot.cols)
 
@@ -453,7 +468,15 @@ final class EditorGridNSView: NSView {
                     let italic = hlAttrs?.italic ?? false
                     glyphKey = GlyphKey(characters: text, bold: bold, italic: italic, fontSize: font.pointSize)
 
-                    // Ensure the glyph is in the atlas
+                    // Use the cascaded render font matching the cell's style so that
+                    // Nerd Font / icon glyphs fall through to the installed fallback font.
+                    let ctFont: CTFont
+                    switch (bold, italic) {
+                    case (true, true):  ctFont = renderFontBoldItalic as CTFont
+                    case (true, false): ctFont = renderFontBold as CTFont
+                    case (false, true): ctFont = renderFontItalic as CTFont
+                    default:            ctFont = renderFont as CTFont
+                    }
                     atlas.rasterise(glyphKey, font: ctFont)
                 }
 
@@ -629,6 +652,11 @@ final class EditorGridNSView: NSView {
         if lower.contains("nfm") { return 3 }
         if lower.contains("awesome") { return 4 }
         return 10
+    }
+
+    private func styledVariant(of base: NSFont, traits: NSFontDescriptor.SymbolicTraits) -> NSFont {
+        let descriptor = base.fontDescriptor.withSymbolicTraits(traits)
+        return NSFont(descriptor: descriptor, size: base.pointSize) ?? base
     }
 
     private func makeCascadedRenderFont(base: NSFont) -> NSFont {
