@@ -92,6 +92,9 @@ final class EditorGridNSView: NSView {
 
     // MARK: - Metal Rendering
 
+    /// Whether the system has a Metal-capable GPU. Checked once at class load time.
+    static let isMetalAvailable: Bool = MTLCreateSystemDefaultDevice() != nil
+
     private var metalAtlas: MetalGlyphAtlas?
     private var metalLayer: CAMetalLayer?
     private var metalBenchmark = RenderBenchmark()
@@ -141,10 +144,15 @@ final class EditorGridNSView: NSView {
     // MARK: - Metal Setup
 
     private func setupMetal() {
-        guard let atlas = MetalGlyphAtlas() else {
-            NSLog("[EditorGridNSView] Failed to create MetalGlyphAtlas — using CoreText renderer")
+        guard EditorGridNSView.isMetalAvailable else {
+            NSLog("[EditorGridNSView] Metal renderer: DISABLED — no Metal-capable GPU detected, using CoreText renderer")
             return
         }
+        guard let atlas = MetalGlyphAtlas() else {
+            NSLog("[EditorGridNSView] Metal renderer: DISABLED — MetalGlyphAtlas init failed, using CoreText renderer")
+            return
+        }
+        NSLog("[EditorGridNSView] Metal renderer: AVAILABLE — GPU: %@", atlas.device.name)
 
         self.metalAtlas = atlas
 

@@ -75,6 +75,25 @@ struct SWUINeovimMacSettingsView: View {
                 #endif
             }
 
+            #if os(macOS)
+            Section("Renderer") {
+                HStack {
+                    Text("Metal GPU Renderer")
+                    Spacer()
+                    if EditorGridNSView.isMetalAvailable {
+                        Text("Available")
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("Unavailable — using CoreText")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text("Metal is activated automatically for large grids (≥ 200 × 60 cells). Smaller grids use CoreText.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            #endif
+
             Section("SSH Servers") {
                 if sshBookmarks.isEmpty {
                     Text("No saved servers. Add one to connect remotely.")
