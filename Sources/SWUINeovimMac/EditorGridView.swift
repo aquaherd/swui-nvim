@@ -86,6 +86,9 @@ final class EditorGridNSView: NSView {
     private var cursorBlinkVisible = true
     private var windowBecameKeyObserver: NSObjectProtocol?
     private var windowResignedKeyObserver: NSObjectProtocol?
+    private var trackingArea: NSTrackingArea?
+    private var previousAcceptsMouseMovedEvents: Bool?
+    private var lastHoveredCell: (row: Int, col: Int, gridID: Int)?
 
     // MARK: - Metal Rendering
 
@@ -94,6 +97,27 @@ final class EditorGridNSView: NSView {
     private var metalBenchmark = RenderBenchmark()
     private var coreTextBenchmark = RenderBenchmark()
     private var useMetalRenderer = false
+#if DEBUG
+    private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
+    private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+#else
+    private static let resizeDebugEnabled = false
+    private static let mouseDebugEnabled = false
+#endif
+
+    private static func resizeDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard resizeDebugEnabled else { return }
+        print("[ResizeDebug][NSView] \(message())")
+#endif
+    }
+
+    private static func mouseDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard mouseDebugEnabled else { return }
+        print("[MouseDebug] \(message())")
+#endif
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
@@ -174,6 +198,23 @@ final class EditorGridNSView: NSView {
         emitResizeIfNeeded()
     }
 
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+
+        let newTrackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(newTrackingArea)
+        trackingArea = newTrackingArea
+
+        super.updateTrackingAreas()
+    }
+
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         updateCursorBlinkState()
@@ -188,12 +229,20 @@ final class EditorGridNSView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if let window, previousAcceptsMouseMovedEvents == nil {
+            previousAcceptsMouseMovedEvents = window.acceptsMouseMovedEvents
+            window.acceptsMouseMovedEvents = true
+        }
         registerWindowFocusObservers()
         updateCursorBlinkState()
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil {
+            if let window, let previousAcceptsMouseMovedEvents {
+                window.acceptsMouseMovedEvents = previousAcceptsMouseMovedEvents
+            }
+            previousAcceptsMouseMovedEvents = nil
             removeWindowFocusObservers()
             stopCursorBlinking()
         }
@@ -207,8 +256,9 @@ final class EditorGridNSView: NSView {
         let shouldMetal = metalAtlas?.shouldUseMetalRenderer(
             columns: snapshot.cols, rows: snapshot.rows
         ) ?? false
+        let useMetalForFrame = shouldMetal && snapshot.layers.isEmpty
 
-        if shouldMetal, let atlas = metalAtlas, let layer = metalLayer {
+        if useMetalForFrame, let atlas = metalAtlas, let layer = metalLayer {
             drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
             useMetalRenderer = true
 
@@ -458,6 +508,16 @@ final class EditorGridNSView: NSView {
         sendMouseEvent(button: "middle", action: "drag", event: event)
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        sendMouseMoveEvent(location: location, flags: event.modifierFlags)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        lastHoveredCell = nil
+        super.mouseExited(with: event)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         let action: String
@@ -589,6 +649,11 @@ final class EditorGridNSView: NSView {
             return
         }
 
+        let previous = lastReportedCellSize.map { "\($0.cols)x\($0.rows)" } ?? "nil"
+        let cellWidth = String(format: "%.2f", cell.width)
+        let cellHeight = String(format: "%.2f", cell.height)
+        Self.resizeDebugLog("[NSView] bounds=\(Int(bounds.width))x\(Int(bounds.height)) cell=\(cellWidth)x\(cellHeight) reported=\(cols)x\(rows) previous=\(previous)")
+
         lastReportedCellSize = (cols, rows)
         requestResize?(cols, rows)
     }
@@ -606,7 +671,27 @@ final class EditorGridNSView: NSView {
     ) {
         guard let cell = cellCoordinates(at: location) else { return }
         let modifiers = mouseModifierString(flags: flags)
+        Self.mouseDebugLog("[NSView] action=\(button):\(action) point=\(Int(location.x)),\(Int(location.y)) grid=\(cell.gridID) row=\(cell.row) col=\(cell.col) mods=\(modifiers)")
         sendMouseInput?(button, action, modifiers, cell.row, cell.col, cell.gridID)
+    }
+
+    private func sendMouseMoveEvent(location: CGPoint, flags: NSEvent.ModifierFlags) {
+        guard let cell = cellCoordinates(at: location) else {
+            lastHoveredCell = nil
+            return
+        }
+
+        if let lastHoveredCell,
+           lastHoveredCell.row == cell.row,
+           lastHoveredCell.col == cell.col,
+           lastHoveredCell.gridID == cell.gridID {
+            return
+        }
+
+        lastHoveredCell = cell
+        let modifiers = mouseModifierString(flags: flags)
+        Self.mouseDebugLog("[NSView] action=move point=\(Int(location.x)),\(Int(location.y)) grid=\(cell.gridID) row=\(cell.row) col=\(cell.col) mods=\(modifiers)")
+        sendMouseInput?("move", "", modifiers, cell.row, cell.col, cell.gridID)
     }
 
     private func cellCoordinates(at location: CGPoint) -> (row: Int, col: Int, gridID: Int)? {
@@ -631,10 +716,15 @@ final class EditorGridNSView: NSView {
                 height: CGFloat(layer.rows) * cell.height
             )
             guard rect.contains(location) else { continue }
+            if layer.isFloating && !layer.mouseEnabled {
+                Self.mouseDebugLog("[HitTest] skipping non-mouse layer=\(layer.id) z=\(layer.zIndex)")
+                continue
+            }
 
             let col = Int(floor((location.x - rect.minX) / cell.width))
             let row = Int(floor((location.y - rect.minY) / cell.height))
             guard row >= 0, col >= 0 else { continue }
+            Self.mouseDebugLog("[HitTest] layer=\(layer.id) floating=\(layer.isFloating) mouseEnabled=\(layer.mouseEnabled) z=\(layer.zIndex) rect=(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height)) point=\(Int(location.x)),\(Int(location.y)) local=\(row),\(col)")
             return (
                 row: min(max(0, row), max(0, layer.rows - 1)),
                 col: min(max(0, col), max(0, layer.cols - 1)),
@@ -645,6 +735,7 @@ final class EditorGridNSView: NSView {
         let col = Int(floor(location.x / cell.width))
         let row = Int(floor(location.y / cell.height))
         guard row >= 0, col >= 0 else { return nil }
+        Self.mouseDebugLog("[HitTest] root point=\(Int(location.x)),\(Int(location.y)) local=\(row),\(col)")
         return (
             row: min(max(0, row), max(0, snapshot.rows - 1)),
             col: min(max(0, col), max(0, snapshot.cols - 1)),

@@ -42,11 +42,33 @@ final class MacSessionController {
     private var userInitiatedDisconnect = false
     private var lastAppliedResize: (cols: Int, rows: Int)?
     private var desiredResize: (cols: Int, rows: Int)?
+    private var resizeTask: Task<Void, Never>?
     private var lastSSHConfig: SSHConnectionConfig?
     private var reconnectAttempts: Int = 0
     private static let maxReconnectAttempts = 5
+#if DEBUG
+    private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
+    private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+#else
+    private static let resizeDebugEnabled = false
+    private static let mouseDebugEnabled = false
+#endif
     private var sessionStateCancellable: AnyCancellable?
     private var hadLiveSession = false
+
+    private static func resizeDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard resizeDebugEnabled else { return }
+        print("[ResizeDebug][Controller] \(message())")
+#endif
+    }
+
+    private static func mouseDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard mouseDebugEnabled else { return }
+        print("[MouseDebug][Controller] \(message())")
+#endif
+    }
 
     // MARK: - Init
 
@@ -95,7 +117,7 @@ final class MacSessionController {
             var originCol: Double
             var isFloating: Bool
             var zIndex: Int
-            var focusable: Bool
+            var mouseEnabled: Bool
         }
 
         var rows: Int
@@ -170,30 +192,34 @@ final class MacSessionController {
 
             let resolved: (row: Double, col: Double)
             if position.isFloating {
-                let anchorGridID = position.anchorGridID ?? 1
-                let anchorOrigin = resolveOrigin(for: anchorGridID, visited: &visited) ?? (0, 0)
-                let anchorRow = anchorOrigin.row + (position.anchorRow ?? 0)
-                let anchorCol = anchorOrigin.col + (position.anchorCol ?? 0)
-                let grid = grids[gridID]
-                let height = Double(grid?.rows ?? position.height)
-                let width = Double(grid?.cols ?? position.width)
+                if let screenRow = position.screenRow, let screenCol = position.screenCol {
+                    resolved = (Double(screenRow), Double(screenCol))
+                } else {
+                    let anchorGridID = position.anchorGridID ?? 1
+                    let anchorOrigin = resolveOrigin(for: anchorGridID, visited: &visited) ?? (0, 0)
+                    let anchorRow = anchorOrigin.row + (position.anchorRow ?? 0)
+                    let anchorCol = anchorOrigin.col + (position.anchorCol ?? 0)
+                    let grid = grids[gridID]
+                    let height = Double(grid?.rows ?? position.height)
+                    let width = Double(grid?.cols ?? position.width)
 
-                var originRow = anchorRow
-                var originCol = anchorCol
+                    var originRow = anchorRow
+                    var originCol = anchorCol
 
-                switch position.anchor {
-                case .northWest:
-                    break
-                case .northEast:
-                    originCol -= width
-                case .southWest:
-                    originRow -= height
-                case .southEast:
-                    originRow -= height
-                    originCol -= width
+                    switch position.anchor {
+                    case .northWest:
+                        break
+                    case .northEast:
+                        originCol -= width
+                    case .southWest:
+                        originRow -= height
+                    case .southEast:
+                        originRow -= height
+                        originCol -= width
+                    }
+
+                    resolved = (originRow, originCol)
                 }
-
-                resolved = (originRow, originCol)
             } else {
                 resolved = (Double(position.startRow), Double(position.startCol))
             }
@@ -217,7 +243,7 @@ final class MacSessionController {
                     originCol: origin.col,
                     isFloating: position.isFloating,
                     zIndex: position.zIndex,
-                    focusable: position.focusable
+                    mouseEnabled: position.mouseEnabled
                 )
             )
         }
@@ -357,7 +383,10 @@ final class MacSessionController {
         hadLiveSession = false
         connectTask?.cancel()
         connectTask = nil
+        resizeTask?.cancel()
+        resizeTask = nil
         lastAppliedResize = nil
+        desiredResize = nil
         sshConnectionState = nil
         currentSSHConfig = nil
 
@@ -382,6 +411,7 @@ final class MacSessionController {
         col: Int,
         gridID: Int = 0
     ) {
+        Self.mouseDebugLog("action=\(button):\(action) grid=\(gridID) row=\(row) col=\(col) mods=\(modifiers)")
         Task {
             try? await session.inputMouse(
                 button: button,
@@ -401,17 +431,59 @@ final class MacSessionController {
         let r = max(1, rows)
         desiredResize = (c, r)
 
+        let applied = lastAppliedResize.map { "\($0.cols)x\($0.rows)" } ?? "nil"
+        Self.resizeDebugLog("requested=\(c)x\(r) applied=\(applied) state=\(session.state)")
+
         guard session.state == .attached else { return }
 
         if let applied = lastAppliedResize,
            applied.cols == c,
-           applied.rows == r {
+           applied.rows == r,
+           resizeTask == nil {
             return
         }
 
-        Task {
-            try? await session.tryResize(width: c, height: r)
-            lastAppliedResize = (c, r)
+        scheduleResizeApplication()
+    }
+
+    private func scheduleResizeApplication() {
+        guard resizeTask == nil else { return }
+
+        resizeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.resizeTask = nil
+                if self.session.state == .attached,
+                   let desired = self.desiredResize,
+                   self.lastAppliedResize.map({ $0 == desired }) != true {
+                    self.scheduleResizeApplication()
+                }
+            }
+
+            while self.session.state == .attached {
+                guard let resize = self.desiredResize else { return }
+                if let applied = self.lastAppliedResize,
+                   applied == resize {
+                    Self.resizeDebugLog("skip already-applied=\(resize.cols)x\(resize.rows)")
+                    return
+                }
+
+                let applied = self.lastAppliedResize.map { "\($0.cols)x\($0.rows)" } ?? "nil"
+                Self.resizeDebugLog("applying requested=\(resize.cols)x\(resize.rows) previous=\(applied)")
+
+                try? await self.session.tryResize(width: resize.cols, height: resize.rows)
+
+                if self.desiredResize.map({ $0 == resize }) == true {
+                    self.lastAppliedResize = resize
+                    Self.resizeDebugLog("applied=\(resize.cols)x\(resize.rows)")
+                    return
+                }
+
+                if Self.resizeDebugEnabled,
+                   let newest = self.desiredResize {
+                    Self.resizeDebugLog("superseded old=\(resize.cols)x\(resize.rows) new=\(newest.cols)x\(newest.rows)")
+                }
+            }
         }
     }
 

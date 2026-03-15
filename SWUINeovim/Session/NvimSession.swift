@@ -448,8 +448,11 @@ public struct WindowPosition: Sendable, Equatable {
     public var anchorGridID: Int?
     public var anchorRow: Double?
     public var anchorCol: Double?
-    public var focusable: Bool
+    public var mouseEnabled: Bool
     public var zIndex: Int
+    public var compIndex: Int?
+    public var screenRow: Int?
+    public var screenCol: Int?
 
     public init(
         gridID: Int,
@@ -462,8 +465,11 @@ public struct WindowPosition: Sendable, Equatable {
         anchorGridID: Int? = nil,
         anchorRow: Double? = nil,
         anchorCol: Double? = nil,
-        focusable: Bool = true,
-        zIndex: Int = 50
+        mouseEnabled: Bool = true,
+        zIndex: Int = 50,
+        compIndex: Int? = nil,
+        screenRow: Int? = nil,
+        screenCol: Int? = nil
     ) {
         self.gridID = gridID
         self.startRow = startRow
@@ -475,8 +481,11 @@ public struct WindowPosition: Sendable, Equatable {
         self.anchorGridID = anchorGridID
         self.anchorRow = anchorRow
         self.anchorCol = anchorCol
-        self.focusable = focusable
+        self.mouseEnabled = mouseEnabled
         self.zIndex = zIndex
+        self.compIndex = compIndex
+        self.screenRow = screenRow
+        self.screenCol = screenCol
     }
 }
 
@@ -504,6 +513,28 @@ public struct WindowPosition: Sendable, Equatable {
 /// ```
 @MainActor
 public final class NvimSession: ObservableObject {
+#if DEBUG
+    private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
+    private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+#else
+    private static let resizeDebugEnabled = false
+    private static let mouseDebugEnabled = false
+#endif
+
+    private static func resizeDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard resizeDebugEnabled else { return }
+        print("[ResizeDebug][NvimSession] \(message())")
+#endif
+    }
+
+    private static func mouseDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard mouseDebugEnabled else { return }
+        print("[MouseDebug][NvimSession] \(message())")
+#endif
+    }
+
     // MARK: - Published State
 
     @Published public private(set) var state: NvimSessionState = .disconnected
@@ -635,6 +666,7 @@ public final class NvimSession: ObservableObject {
     ///
     /// - Parameter keys: The key string in Neovim notation (e.g. `"<C-a>"`, `"<D-s>"`).
     public func input(_ keys: String) async throws {
+        dismissVisibleMessagesForUserInput(keys: keys)
         _ = try await rpcRequest(method: "nvim_input", params: [.string(keys)])
     }
 
@@ -655,6 +687,8 @@ public final class NvimSession: ObservableObject {
         gridID: Int = 0,
         modifier: String = ""
     ) async throws {
+        dismissVisibleMessagesForMouseInput(button: button, action: action)
+        Self.mouseDebugLog("rpc inputMouse action=\(button):\(action) grid=\(gridID) row=\(row) col=\(col) modifier=\(modifier)")
         _ = try await rpcRequest(method: "nvim_input_mouse", params: [
             .string(button),
             .string(action),
@@ -672,14 +706,18 @@ public final class NvimSession: ObservableObject {
     ///   - width: New width in columns.
     ///   - height: New height in rows.
     public func tryResize(gridID: Int = 1, width: Int, height: Int) async throws {
-        if grids.keys.contains(where: { _ in true }) && grids.count > 1 {
-            // Multigrid mode
+        Self.resizeDebugLog("rpc tryResize grid=\(gridID) size=\(width)x\(height) usesMultigrid=\(usesMultigrid) grids=\(grids.count)")
+        if gridID != 1 {
+            // Explicit grid resize for external multigrid surfaces.
             _ = try await rpcRequest(method: "nvim_ui_try_resize_grid", params: [
                 .int(Int64(gridID)),
                 .int(Int64(width)),
                 .int(Int64(height)),
             ])
         } else {
+            // Resize the overall UI viewport. Even with ext_multigrid enabled,
+            // this app renders a single root viewport and relies on Neovim to
+            // recompute win_pos/grid layout from the new screen dimensions.
             _ = try await rpcRequest(method: "nvim_ui_try_resize", params: [
                 .int(Int64(width)),
                 .int(Int64(height)),
@@ -692,6 +730,19 @@ public final class NvimSession: ObservableObject {
     /// Execute a Neovim command.
     public func command(_ cmd: String) async throws {
         _ = try await rpcRequest(method: "nvim_command", params: [.string(cmd)])
+    }
+
+    private func dismissVisibleMessagesForUserInput(keys: String) {
+        guard !messages.isEmpty else { return }
+        guard keys != ":" else { return }
+        messages.removeAll()
+    }
+
+    private func dismissVisibleMessagesForMouseInput(button: String, action: String) {
+        guard !messages.isEmpty else { return }
+        guard button != "move" else { return }
+        guard action != "" else { return }
+        messages.removeAll()
     }
 
     /// Evaluate a Neovim expression and return the result.
@@ -1025,6 +1076,8 @@ public final class NvimSession: ObservableObject {
               let rows = args[2].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
+        Self.resizeDebugLog("event grid_resize grid=\(gridID) size=\(cols)x\(rows)")
+
         if let grid = grids[gridID] {
             grid.resize(rows: rows, cols: cols)
         } else {
@@ -1163,6 +1216,8 @@ public final class NvimSession: ObservableObject {
               let height = args[5].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
+          Self.resizeDebugLog("event win_pos grid=\(gridID) origin=\(startCol),\(startRow) size=\(width)x\(height)")
+
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
             startRow: startRow,
@@ -1173,7 +1228,7 @@ public final class NvimSession: ObservableObject {
     }
 
     private func handleWinFloatPos(_ args: [MsgPackValue]) {
-        // args: [grid, win, anchor, anchor_grid, anchor_row, anchor_col, focusable, zindex]
+        // args: [grid, win, anchor, anchor_grid, anchor_row, anchor_col, mouse_enabled, zindex, compindex?, screen_row?, screen_col?]
         guard args.count >= 6,
               let gridID = args[0].intValue.flatMap({ Int(exactly: $0) }),
               let anchorGrid = args[3].intValue.flatMap({ Int(exactly: $0) })
@@ -1183,8 +1238,13 @@ public final class NvimSession: ObservableObject {
         let anchor = FloatAnchor(rawValue: anchorStr) ?? .northWest
         let anchorRow = args[4].doubleValue ?? args[4].intValue.flatMap({ Double($0) }) ?? 0
         let anchorCol = args[5].doubleValue ?? args[5].intValue.flatMap({ Double($0) }) ?? 0
-        let focusable = args.count > 6 ? (args[6].boolValue ?? true) : true
+        let mouseEnabled = args.count > 6 ? (args[6].boolValue ?? true) : true
         let zIndex = args.count > 7 ? (args[7].intValue.flatMap({ Int(exactly: $0) }) ?? 50) : 50
+        let compIndex = args.count > 8 ? args[8].intValue.flatMap({ Int(exactly: $0) }) : nil
+        let screenRow = args.count > 9 ? args[9].intValue.flatMap({ Int(exactly: $0) }) : nil
+        let screenCol = args.count > 10 ? args[10].intValue.flatMap({ Int(exactly: $0) }) : nil
+
+        Self.resizeDebugLog("event win_float_pos grid=\(gridID) anchorGrid=\(anchorGrid) anchor=\(anchor.rawValue) anchorPos=\(anchorCol),\(anchorRow) mouseEnabled=\(mouseEnabled) z=\(zIndex) screen=\(screenCol.map(String.init) ?? "nil"),\(screenRow.map(String.init) ?? "nil")")
 
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
@@ -1193,14 +1253,17 @@ public final class NvimSession: ObservableObject {
             anchorGridID: anchorGrid,
             anchorRow: anchorRow,
             anchorCol: anchorCol,
-            focusable: focusable,
-            zIndex: zIndex
+            mouseEnabled: mouseEnabled,
+            zIndex: zIndex,
+            compIndex: compIndex,
+            screenRow: screenRow,
+            screenCol: screenCol
         )
 
         // Detect tooltip-like floating windows (hover info, diagnostics).
         // These are typically small, non-focusable floating windows.
         // We populate the tooltip state so the TooltipOverlay can display them.
-        if !focusable, let grid = grids[gridID] {
+        if !mouseEnabled, let grid = grids[gridID] {
             var content: [(highlightID: Int, text: String)] = []
             for row in 0..<grid.rows {
                 if let rowCells = grid.getRow(row) {
@@ -1240,7 +1303,7 @@ public final class NvimSession: ObservableObject {
     private func handleWinHide(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
         // If this was a tooltip floating window, hide the tooltip
-        if let pos = windowPositions[gridID], pos.isFloating && !pos.focusable {
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.mouseEnabled {
             tooltip.isVisible = false
         }
         windowPositions.removeValue(forKey: gridID)
@@ -1249,7 +1312,7 @@ public final class NvimSession: ObservableObject {
     private func handleWinClose(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
         // If this was a tooltip floating window, hide the tooltip
-        if let pos = windowPositions[gridID], pos.isFloating && !pos.focusable {
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.mouseEnabled {
             tooltip.isVisible = false
         }
         grids.removeValue(forKey: gridID)

@@ -64,8 +64,11 @@ public enum RedrawEvent: Sendable, Equatable {
         anchorGrid: Int,
         anchorRow: Double,
         anchorCol: Double,
-        focusable: Bool,
-        zindex: Int
+        mouseEnabled: Bool,
+        zindex: Int,
+        compindex: Int?,
+        screenRow: Int?,
+        screenCol: Int?
     )
     case winExternalPos(grid: Int, win: Int)
     case winHide(grid: Int)
@@ -775,17 +778,24 @@ extension RedrawBatch {
               let anchorGrid = args[3].intValue,
               let anchorRow = args[4].doubleValue ?? args[4].intValue.map({ Double($0) }),
               let anchorCol = args[5].doubleValue ?? args[5].intValue.map({ Double($0) }),
-              let focusable = args[6].boolValue
+              let mouseEnabled = args[6].boolValue
         else { return nil }
 
         let zindex = args.count > 7 ? (args[7].intValue.map { Int($0) } ?? 50) : 50
+        let compindex = args.count > 8 ? args[8].intValue.map { Int($0) } : nil
+        let screenRow = args.count > 9 ? args[9].intValue.map { Int($0) } : nil
+        let screenCol = args.count > 10 ? args[10].intValue.map { Int($0) } : nil
 
         return .winFloatPos(
             grid: Int(grid), win: Int(win),
             anchor: FloatAnchor(from: anchorStr),
             anchorGrid: Int(anchorGrid),
             anchorRow: anchorRow, anchorCol: anchorCol,
-            focusable: focusable, zindex: zindex
+            mouseEnabled: mouseEnabled,
+            zindex: zindex,
+            compindex: compindex,
+            screenRow: screenRow,
+            screenCol: screenCol
         )
     }
 

@@ -204,33 +204,37 @@ struct MultigridOverlayView: View {
     let fontSize: Double
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(snapshot.layers) { layer in
-                if layer.id != 1 {
-                    MultigridLayerView(
-                        layer: layer,
-                        defaultFG: snapshot.defaultForeground,
-                        defaultBG: snapshot.defaultBackground,
-                        highlightTable: snapshot.highlights,
-                        fontName: fontName,
-                        fontSize: fontSize,
-                        cellSize: cellSize
-                    )
-                    .frame(
-                        width: CGFloat(layer.cols) * cellSize.width,
-                        height: CGFloat(layer.rows) * cellSize.height,
-                        alignment: .topLeading
-                    )
-                    .offset(
-                        x: CGFloat(layer.originCol) * cellSize.width,
-                        y: CGFloat(layer.originRow) * cellSize.height
-                    )
+        GeometryReader { _ in
+            ZStack(alignment: .topLeading) {
+                ForEach(snapshot.layers) { layer in
+                    if layer.id != 1 {
+                        MultigridLayerView(
+                            layer: layer,
+                            defaultFG: snapshot.defaultForeground,
+                            defaultBG: snapshot.defaultBackground,
+                            highlightTable: snapshot.highlights,
+                            fontName: fontName,
+                            fontSize: fontSize,
+                            cellSize: cellSize
+                        )
+                        .frame(
+                            width: CGFloat(layer.cols) * cellSize.width,
+                            height: CGFloat(layer.rows) * cellSize.height,
+                            alignment: .topLeading
+                        )
+                        .offset(
+                            x: CGFloat(layer.originCol) * cellSize.width,
+                            y: CGFloat(layer.originRow) * cellSize.height
+                        )
+                    }
+                }
+
+                if let cursorLayer = cursorLayer {
+                    cursorOverlay(in: cursorLayer)
                 }
             }
-
-            if let cursorLayer = cursorLayer {
-                cursorOverlay(in: cursorLayer)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .clipped()
         }
         .allowsHitTesting(false)
     }
