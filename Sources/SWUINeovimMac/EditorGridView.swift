@@ -609,7 +609,8 @@ final class EditorGridNSView: NSView {
                 let lower = name.lowercased()
                 return lower.contains("nerd") ||
                     lower.contains("nfm") ||
-                    lower.contains("symbols")
+                    lower.contains("symbols") ||
+                    lower.contains("awesome")
             }
             .sorted { lhs, rhs in
                 rankFallbackName(lhs) < rankFallbackName(rhs)
@@ -626,6 +627,7 @@ final class EditorGridNSView: NSView {
         if lower.contains("symbols") { return 1 }
         if lower.contains("nerd") && lower.contains("mono") { return 2 }
         if lower.contains("nfm") { return 3 }
+        if lower.contains("awesome") { return 4 }
         return 10
     }
 
