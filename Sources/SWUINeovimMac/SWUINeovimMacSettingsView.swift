@@ -269,6 +269,8 @@ private struct FontPanelAccessor: NSViewRepresentable {
             let manager = NSFontManager.shared
             manager.target = self
             manager.action = #selector(changeFont(_:))
+            manager.setFilteredAttributes([NSFontDescriptor.AttributeName.fixedAdvance.rawValue: 0],
+                                          withMask: NSFontTraitMask.fixedPitchFontMask)
             NSFontPanel.shared.setPanelFont(seed, isMultiple: false)
             manager.orderFrontFontPanel(nil)
         }
