@@ -266,72 +266,7 @@ struct PopupMenuItemRow: View {
     }
 }
 
-// MARK: - PopupMenuState
-
-/// State model for the popup menu, populated from Neovim's `popupmenu_show` event.
-///
-/// This type is defined here for view-layer use. The canonical source lives in
-/// `NvimSession` which publishes it as `@Published var popupMenu`.
-public struct PopupMenuState: Equatable, Sendable {
-    /// Whether the popup menu is currently visible.
-    public var isVisible: Bool
-
-    /// The list of completion items.
-    public var items: [PopupMenuItem]
-
-    /// The currently selected item index (-1 if nothing is selected).
-    public var selectedIndex: Int
-
-    /// The grid row where the popup should be anchored.
-    public var row: Int
-
-    /// The grid column where the popup should be anchored.
-    public var col: Int
-
-    /// The grid ID that the popup belongs to.
-    public var gridID: Int
-
-    public init(
-        isVisible: Bool = false,
-        items: [PopupMenuItem] = [],
-        selectedIndex: Int = -1,
-        row: Int = 0,
-        col: Int = 0,
-        gridID: Int = 1
-    ) {
-        self.isVisible = isVisible
-        self.items = items
-        self.selectedIndex = selectedIndex
-        self.row = row
-        self.col = col
-        self.gridID = gridID
-    }
-}
-
-// MARK: - PopupMenuItem
-
-/// A single item in the completion popup menu.
-public struct PopupMenuItem: Equatable, Sendable, Identifiable {
-    public var id: Int
-    public var word: String
-    public var kind: String
-    public var menu: String
-    public var info: String
-
-    public init(
-        id: Int = 0,
-        word: String = "",
-        kind: String = "",
-        menu: String = "",
-        info: String = ""
-    ) {
-        self.id = id
-        self.word = word
-        self.kind = kind
-        self.menu = menu
-        self.info = info
-    }
-}
+// PopupMenuState and PopupMenuItem are defined in NvimSession.swift.
 
 // MARK: - Preview
 

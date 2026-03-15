@@ -10,37 +10,11 @@ import CoreGraphics
 
 #if os(macOS)
 import AppKit
-public typealias PlatformColor = NSColor
 #else
 import UIKit
-public typealias PlatformColor = UIColor
 #endif
 
-// MARK: - Cursor Shape
-
-/// The visual shape of the cursor, matching Neovim's `mode_info_set` cursor shapes.
-public enum CursorShape: String, Sendable, Equatable {
-    /// Full-cell block cursor (normal mode).
-    case block
-    /// Thin vertical bar on the left edge (insert mode).
-    case vertical
-    /// Thin horizontal bar at the bottom of the cell (replace mode).
-    case horizontal
-
-    /// Initialize from Neovim's `cursor_shape` string.
-    public init(nvimShape: String) {
-        switch nvimShape.lowercased() {
-        case "block":
-            self = .block
-        case "vertical":
-            self = .vertical
-        case "horizontal":
-            self = .horizontal
-        default:
-            self = .block
-        }
-    }
-}
+// NOTE: CursorShape is defined in NvimUIEvents.swift
 
 // MARK: - Cursor Style
 
@@ -431,7 +405,7 @@ public final class CursorRenderer: @unchecked Sendable {
         let info = modeInfoList[modeIndex]
 
         let shapeStr = info["cursor_shape"] as? String ?? "block"
-        let shape = CursorShape(nvimShape: shapeStr)
+        let shape = CursorShape(from: shapeStr)
         let cellPercentage = info["cell_percentage"] as? Int ?? (shape == .block ? 100 : 25)
         let attrID = info["attr_id"] as? Int ?? 0
         let blinkWait = info["blinkwait"] as? Int ?? 0
@@ -502,6 +476,7 @@ public final class DisplayLinkCursorAnimator: @unchecked Sendable {
         guard let displayLink else { return }
 
         let callbackPointer = Unmanaged.passRetained(CallbackBox(callback)).toOpaque()
+        let sendablePointer = callbackPointer  // capture as Sendable
 
         CVDisplayLinkSetOutputCallback(
             displayLink,
@@ -513,7 +488,7 @@ public final class DisplayLinkCursorAnimator: @unchecked Sendable {
                 }
                 return kCVReturnSuccess
             },
-            callbackPointer
+            sendablePointer
         )
 
         CVDisplayLinkStart(displayLink)
@@ -529,7 +504,7 @@ public final class DisplayLinkCursorAnimator: @unchecked Sendable {
         stop()
     }
 
-    private final class CallbackBox {
+    private final class CallbackBox: @unchecked Sendable {
         let callback: () -> Void
         init(_ callback: @escaping () -> Void) {
             self.callback = callback

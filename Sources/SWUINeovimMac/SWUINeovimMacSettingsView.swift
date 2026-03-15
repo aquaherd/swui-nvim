@@ -1,4 +1,5 @@
 import SwiftUI
+import Transport
 #if os(macOS)
 import AppKit
 #endif
@@ -10,6 +11,9 @@ struct SWUINeovimMacSettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var openFontPanelToken: Int = 0
     @State private var fontValidationMessage: String?
+    @StateObject private var bookmarkLibrary = SSHBookmarkLibrary.shared
+    @State private var editingBookmark: SSHBookmark?
+    @State private var showBookmarkEditor = false
 
     private var currentBackgroundLabel: String {
         colorScheme == .dark ? "dark" : "light"
@@ -70,10 +74,71 @@ struct SWUINeovimMacSettingsView: View {
                 .frame(width: 0, height: 0)
                 #endif
             }
+
+            Section("SSH Servers") {
+                if sshBookmarks.isEmpty {
+                    Text("No saved servers. Add one to connect remotely.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(sshBookmarks) { bookmark in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(bookmark.name)
+                                    .fontWeight(.medium)
+                                Text("\(bookmark.username)@\(bookmark.host):\(bookmark.port)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Edit") {
+                                editingBookmark = bookmark
+                                showBookmarkEditor = true
+                            }
+                            .buttonStyle(.borderless)
+                            Button(role: .destructive) {
+                                SSHKeychainHelper.delete(forBookmarkID: bookmark.id)
+                                SSHBookmarkStore.save(sshBookmarks.filter { $0.id != bookmark.id })
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                Button("Add Server…") {
+                    editingBookmark = nil
+                    showBookmarkEditor = true
+                }
+            }
         }
         .formStyle(.grouped)
         .padding(12)
         .frame(width: 520)
+        .sheet(isPresented: $showBookmarkEditor) {
+            SSHBookmarkEditorView(
+                bookmark: editingBookmark,
+                onSave: { bookmark in
+                    var updated = sshBookmarks
+                    if let idx = sshBookmarks.firstIndex(where: { $0.id == bookmark.id }) {
+                        updated[idx] = bookmark
+                    } else {
+                        updated.append(bookmark)
+                    }
+                    SSHBookmarkStore.save(updated)
+                    showBookmarkEditor = false
+                },
+                onCancel: {
+                    showBookmarkEditor = false
+                }
+            )
+        }
+        .onAppear {
+            bookmarkLibrary.reload()
+        }
+    }
+
+    private var sshBookmarks: [SSHBookmark] {
+        bookmarkLibrary.bookmarks
     }
 }
 

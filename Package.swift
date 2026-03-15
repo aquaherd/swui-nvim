@@ -14,6 +14,7 @@ let package = Package(
     dependencies: [
         .package(path: "Packages/MsgPack"),
         .package(path: "Packages/NvimRPC"),
+        .package(path: "Packages/Transport"),
     ],
     targets: [
         .target(
@@ -21,6 +22,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MsgPack", package: "MsgPack"),
                 .product(name: "NvimRPC", package: "NvimRPC"),
+                .product(name: "Transport", package: "Transport"),
             ],
             path: "SWUINeovim",
             exclude: [
@@ -39,8 +41,10 @@ let package = Package(
         .executableTarget(
             name: "SWUINeovimMac",
             dependencies: [
+                "SWUINeovim",
                 .product(name: "MsgPack", package: "MsgPack"),
                 .product(name: "NvimRPC", package: "NvimRPC"),
+                .product(name: "Transport", package: "Transport"),
             ],
             path: "Sources/SWUINeovimMac"
         ),

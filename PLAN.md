@@ -295,11 +295,11 @@ Display
 
 ### Phase 3 — Overlays (Week 8–9)
 
-- [ ] `ext_popupmenu` → `PopupMenuOverlay` (completion list).
-- [ ] `ext_cmdline` → `CmdlineOverlay` (command-line at bottom).
-- [ ] `ext_messages` → `MessageOverlay` (notification banners).
-- [ ] Floating windows (`win_float_pos`) → overlay positioned cards.
-- [ ] Tooltip / hover overlay for LSP hover info.
+- [x] `ext_popupmenu` → `PopupMenuOverlay` (completion list).
+- [x] `ext_cmdline` → `CmdlineOverlay` (command-line at bottom).
+- [x] `ext_messages` → `MessageOverlay` (notification banners).
+- [x] Floating windows (`win_float_pos`) → overlay positioned cards.
+- [x] Tooltip / hover overlay for LSP hover info.
 
 ### Phase 4 — SSH Transport (Week 10–12)
 
@@ -311,12 +311,12 @@ Display
 
 ### Phase 5 — Metal Renderer (Week 13–14)
 
-- [ ] `MetalGlyphAtlas`: rasterise glyphs into a texture atlas.
-- [ ] Instanced draw call for the grid (one quad per cell, texture lookup).
-- [ ] `GlyphShader.metal`: vertex + fragment shader.
-- [ ] **Box-drawing in atlas**: In `MetalGlyphAtlas.rasterise()`, detect box-drawing characters via `BoxDrawingLookup.info(for:)` and draw them into the atlas bitmap using CGContext path logic (shared with `CoreTextRenderer`) instead of `CTLineDraw`. This reuses the existing lookup table and segment-drawing code — no procedural Metal geometry needed. Alternatively, extract `drawStraightSegments()`/`drawRoundedCorner()` into a standalone helper that accepts any `CGContext`.
-- [ ] Benchmarks: compare CoreText-only vs. Metal path.
-- [ ] Automatic fallback on unsupported hardware.
+- [x] `MetalGlyphAtlas`: rasterise glyphs into a texture atlas.
+- [x] Instanced draw call for the grid (one quad per cell, texture lookup).
+- [x] `GlyphShader.metal`: vertex + fragment shader.
+- [x] **Box-drawing in atlas**: In `MetalGlyphAtlas.rasterise()`, detect box-drawing characters via `BoxDrawingLookup.info(for:)` and draw them into the atlas bitmap using CGContext path logic (shared with `CoreTextRenderer`) instead of `CTLineDraw`. Extracted `BoxDrawingRenderer` helper that accepts any `CGContext`.
+- [x] Benchmarks: `RenderBenchmark` struct tracks avg/p95 frame times for both CoreText and Metal paths. `EditorGridNSView.renderStats` exposes active renderer stats.
+- [x] Automatic fallback on unsupported hardware. Metal used when grid exceeds `cellCountThreshold` (12K cells); CoreText otherwise. Falls back gracefully when Metal device unavailable.
 
 ### Phase 6 — Polish & App Store (Week 15–17)
 

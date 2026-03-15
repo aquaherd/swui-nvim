@@ -47,14 +47,35 @@ public struct EditorView: View {
                 .accessibilityLabel("Neovim editor")
                 .accessibilityAddTraits(.allowsDirectInteraction)
 
-            // Layer 2: Popup menu overlay
+            // Layer 2: Floating windows (rendered above the main grid)
+            FloatingWindowOverlay(
+                grids: session.grids,
+                windowPositions: session.windowPositions,
+                highlightTable: session.highlightTable,
+                defaultColors: session.defaultColors,
+                cellSize: currentCellSize
+            )
+
+            // Layer 3: Popup menu overlay (completion list)
             if session.popupMenu.isVisible {
                 PopupMenuOverlay(
-                    popupMenu: session.popupMenu,
+                    state: session.popupMenu,
                     cellSize: currentCellSize,
+                    gridOrigin: .zero,
                     onSelect: { index in
                         Task {
-                            try? await session.input("<C-n>")
+                            // Navigate to the selected item by sending appropriate keys
+                            let delta = index - session.popupMenu.selectedIndex
+                            if delta > 0 {
+                                for _ in 0..<delta {
+                                    try? await session.input("<C-n>")
+                                }
+                            } else if delta < 0 {
+                                for _ in 0..<(-delta) {
+                                    try? await session.input("<C-p>")
+                                }
+                            }
+                            try? await session.input("<CR>")
                         }
                     }
                 )
@@ -62,28 +83,68 @@ public struct EditorView: View {
                 .animation(.easeOut(duration: 0.12), value: session.popupMenu.isVisible)
             }
 
-            // Layer 3: Command line overlay
+            // Layer 4: Tooltip / hover overlay
+            if session.tooltip.isVisible {
+                TooltipOverlay(
+                    state: session.tooltip,
+                    cellSize: currentCellSize,
+                    highlightTable: session.highlightTable,
+                    defaultColors: session.defaultColors
+                )
+                .transition(.opacity)
+                .animation(.easeOut(duration: 0.1), value: session.tooltip.isVisible)
+            }
+
+            // Layer 5: Command line overlay (at bottom)
             if session.cmdline.isVisible {
                 VStack {
                     Spacer()
-                    CmdlineOverlay(cmdline: session.cmdline)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    CmdlineOverlay(
+                        state: session.cmdline,
+                        highlightTable: session.highlightTable,
+                        defaultColors: session.defaultColors
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 .animation(.easeOut(duration: 0.15), value: session.cmdline.isVisible)
             }
 
-            // Layer 4: Message overlay
+            // Layer 6: Command line block overlay (multiline :lua blocks)
+            if !session.cmdlineBlock.isEmpty {
+                VStack {
+                    Spacer()
+                    CmdlineBlockOverlay(
+                        blockLines: session.cmdlineBlock,
+                        highlightTable: session.highlightTable,
+                        defaultColors: session.defaultColors
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                .animation(.easeOut(duration: 0.15), value: session.cmdlineBlock.count)
+            }
+
+            // Layer 7: Message overlay (notification banners)
             if !session.messages.isEmpty {
                 VStack {
                     Spacer()
-                    MessageOverlay(messages: session.messages)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .padding(.bottom, session.cmdline.isVisible ? 40 : 8)
+                    MessageOverlay(
+                        messages: session.messages,
+                        resolveHighlight: { hlID in
+                            let attrs = session.highlightTable[hlID]
+                            let fg = Color(rgb: attrs?.foreground ?? session.defaultColors.foreground)
+                            let bg = Color(rgb: attrs?.background ?? session.defaultColors.background)
+                            return (foreground: fg, background: bg)
+                        },
+                        defaultForeground: Color(rgb: session.defaultColors.foreground),
+                        defaultBackground: Color(rgb: session.defaultColors.background)
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .padding(.bottom, session.cmdline.isVisible ? 52 : 8)
                 }
                 .animation(.easeOut(duration: 0.2), value: session.messages.count)
             }
 
-            // Layer 5: Busy indicator
+            // Layer 8: Busy indicator
             if session.isBusy {
                 VStack {
                     HStack {
@@ -1025,138 +1086,12 @@ enum KeyTranslator {
 }
 #endif
 
-// MARK: - Popup Menu Overlay
-
-struct PopupMenuOverlay: View {
-    let popupMenu: PopupMenuState
-    let cellSize: CGSize
-    let onSelect: (Int) -> Void
-
-    var body: some View {
-        let x = CGFloat(popupMenu.col) * cellSize.width
-        let y = CGFloat(popupMenu.row + 1) * cellSize.height
-
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(popupMenu.items) { item in
-                        HStack(spacing: 6) {
-                            if !item.kind.isEmpty {
-                                Text(item.kind)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 20, alignment: .center)
-                            }
-
-                            Text(item.word)
-                                .font(.system(.body, design: .monospaced))
-                                .lineLimit(1)
-
-                            if !item.menu.isEmpty {
-                                Spacer()
-                                Text(item.menu)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            item.id == popupMenu.selectedIndex
-                                ? Color.accentColor.opacity(0.3)
-                                : Color.clear
-                        )
-                        .id(item.id)
-                    }
-                }
-            }
-            .frame(maxWidth: 400, maxHeight: 300)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
-            .onChange(of: popupMenu.selectedIndex) { _, newIndex in
-                withAnimation(.easeInOut(duration: 0.1)) {
-                    proxy.scrollTo(newIndex, anchor: .center)
-                }
-            }
-        }
-        .offset(x: x, y: y)
-    }
-}
-
-// MARK: - Command Line Overlay
-
-struct CmdlineOverlay: View {
-    let cmdline: CmdlineState
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if !cmdline.firstCharacter.isEmpty {
-                Text(cmdline.firstCharacter)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-
-            if !cmdline.prompt.isEmpty {
-                Text(cmdline.prompt)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.primary)
-            }
-
-            Text(cmdline.text)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: -2)
-        .padding(.horizontal, 8)
-        .padding(.bottom, 4)
-    }
-}
-
-// MARK: - Message Overlay
-
-struct MessageOverlay: View {
-    let messages: [MessageEntry]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(messages.suffix(5)) { message in
-                HStack(spacing: 6) {
-                    if message.kind == "emsg" || message.kind == "echoerr" {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(.red)
-                            .font(.caption)
-                    } else if message.kind == "wmsg" {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
-                            .font(.caption)
-                    }
-
-                    Text(message.text)
-                        .font(.system(.caption, design: .monospaced))
-                        .lineLimit(3)
-                        .foregroundStyle(.primary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-    }
-}
+// Overlay views are now provided by the Overlays/ directory:
+// - PopupMenuOverlay.swift  (ext_popupmenu)
+// - CmdlineOverlay.swift    (ext_cmdline)
+// - MessageOverlay.swift    (ext_messages)
+// - FloatingWindowOverlay.swift (win_float_pos)
+// - TooltipOverlay.swift    (LSP hover)
 
 // MARK: - Previews
 

@@ -3,26 +3,31 @@ import SwiftUI
 import AppKit
 import CoreText
 import Carbon.HIToolbox
+import Metal
+import QuartzCore
+import SWUINeovim
 
 struct EditorGridViewRepresentable: NSViewRepresentable {
-    let controller: Phase1SessionController
+    let controller: MacSessionController
+    let snapshot: MacSessionController.GridSnapshot
     let fontName: String
     let fontSize: Double
 
     func makeNSView(context: Context) -> EditorGridNSView {
         let view = EditorGridNSView()
         view.setEditorFont(name: fontName, size: CGFloat(fontSize))
-        view.update(with: controller.gridSnapshot)
+        view.update(with: snapshot)
         view.sendInput = { keys in
             controller.sendInput(keys)
         }
-        view.sendMouseInput = { button, action, modifiers, row, col in
+        view.sendMouseInput = { button, action, modifiers, row, col, gridID in
             controller.sendMouse(
                 button: button,
                 action: action,
                 modifiers: modifiers,
                 row: row,
-                col: col
+                col: col,
+                gridID: gridID
             )
         }
         view.requestResize = { cols, rows in
@@ -33,17 +38,18 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
 
     func updateNSView(_ nsView: EditorGridNSView, context: Context) {
         nsView.setEditorFont(name: fontName, size: CGFloat(fontSize))
-        nsView.update(with: controller.gridSnapshot)
+        nsView.update(with: snapshot)
         nsView.sendInput = { keys in
             controller.sendInput(keys)
         }
-        nsView.sendMouseInput = { button, action, modifiers, row, col in
+        nsView.sendMouseInput = { button, action, modifiers, row, col, gridID in
             controller.sendMouse(
                 button: button,
                 action: action,
                 modifiers: modifiers,
                 row: row,
-                col: col
+                col: col,
+                gridID: gridID
             )
         }
         nsView.requestResize = { cols, rows in
@@ -54,16 +60,18 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
 
 final class EditorGridNSView: NSView {
     var sendInput: ((String) -> Void)?
-    var sendMouseInput: ((String, String, String, Int, Int) -> Void)?
+    var sendMouseInput: ((String, String, String, Int, Int, Int) -> Void)?
     var requestResize: ((Int, Int) -> Void)?
 
-    private var snapshot = Phase1SessionController.GridSnapshot(
+    private var snapshot = MacSessionController.GridSnapshot(
         rows: 1,
         cols: 1,
-        cells: [[.init()]],
+        cells: [[GridCell()]],
         cursorRow: 0,
         cursorCol: 0,
+        cursorGridID: 1,
         useIBeamCursor: false,
+        layers: [],
         defaultForeground: 0xFFFFFF,
         defaultBackground: 0x000000,
         highlights: [:]
@@ -78,6 +86,38 @@ final class EditorGridNSView: NSView {
     private var cursorBlinkVisible = true
     private var windowBecameKeyObserver: NSObjectProtocol?
     private var windowResignedKeyObserver: NSObjectProtocol?
+    private var trackingArea: NSTrackingArea?
+    private var previousAcceptsMouseMovedEvents: Bool?
+    private var lastHoveredCell: (row: Int, col: Int, gridID: Int)?
+
+    // MARK: - Metal Rendering
+
+    private var metalAtlas: MetalGlyphAtlas?
+    private var metalLayer: CAMetalLayer?
+    private var metalBenchmark = RenderBenchmark()
+    private var coreTextBenchmark = RenderBenchmark()
+    private var useMetalRenderer = false
+#if DEBUG
+    private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
+    private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+#else
+    private static let resizeDebugEnabled = false
+    private static let mouseDebugEnabled = false
+#endif
+
+    private static func resizeDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard resizeDebugEnabled else { return }
+        print("[ResizeDebug][NSView] \(message())")
+#endif
+    }
+
+    private static func mouseDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard mouseDebugEnabled else { return }
+        print("[MouseDebug] \(message())")
+#endif
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
@@ -87,6 +127,7 @@ final class EditorGridNSView: NSView {
         renderFont = font
         attrs = [.font: renderFont]
         refreshFallbackFontCandidates()
+        setupMetal()
     }
 
     required init?(coder: NSCoder) {
@@ -94,6 +135,29 @@ final class EditorGridNSView: NSView {
         renderFont = font
         attrs = [.font: renderFont]
         refreshFallbackFontCandidates()
+        setupMetal()
+    }
+
+    // MARK: - Metal Setup
+
+    private func setupMetal() {
+        guard let atlas = MetalGlyphAtlas() else {
+            NSLog("[EditorGridNSView] Failed to create MetalGlyphAtlas — using CoreText renderer")
+            return
+        }
+
+        self.metalAtlas = atlas
+
+        let layer = CAMetalLayer()
+        layer.device = atlas.device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        layer.isHidden = true
+
+        self.wantsLayer = true
+        self.layer?.addSublayer(layer)
+        self.metalLayer = layer
     }
 
     func setEditorFont(name: String, size: CGFloat) {
@@ -114,11 +178,13 @@ final class EditorGridNSView: NSView {
         renderFont = makeCascadedRenderFont(base: font)
         attrs = [.font: renderFont]
         lastReportedCellSize = nil
+        metalAtlas?.clearAtlas()
+        metalAtlas?.measureCellSize(font: font as CTFont)
         needsDisplay = true
         emitResizeIfNeeded()
     }
 
-    func update(with snapshot: Phase1SessionController.GridSnapshot) {
+    func update(with snapshot: MacSessionController.GridSnapshot) {
         self.snapshot = snapshot
         needsDisplay = true
         window?.makeFirstResponder(self)
@@ -128,7 +194,25 @@ final class EditorGridNSView: NSView {
 
     override func layout() {
         super.layout()
+        metalLayer?.frame = bounds
         emitResizeIfNeeded()
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+
+        let newTrackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(newTrackingArea)
+        trackingArea = newTrackingArea
+
+        super.updateTrackingAreas()
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -145,12 +229,20 @@ final class EditorGridNSView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if let window, previousAcceptsMouseMovedEvents == nil {
+            previousAcceptsMouseMovedEvents = window.acceptsMouseMovedEvents
+            window.acceptsMouseMovedEvents = true
+        }
         registerWindowFocusObservers()
         updateCursorBlinkState()
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil {
+            if let window, let previousAcceptsMouseMovedEvents {
+                window.acceptsMouseMovedEvents = previousAcceptsMouseMovedEvents
+            }
+            previousAcceptsMouseMovedEvents = nil
             removeWindowFocusObservers()
             stopCursorBlinking()
         }
@@ -158,16 +250,44 @@ final class EditorGridNSView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let cellSize = measureCell()
+
+        // Decide whether to use Metal for this frame
+        let shouldMetal = metalAtlas?.shouldUseMetalRenderer(
+            columns: snapshot.cols, rows: snapshot.rows
+        ) ?? false
+        let useMetalForFrame = shouldMetal && snapshot.layers.isEmpty
+
+        if useMetalForFrame, let atlas = metalAtlas, let layer = metalLayer {
+            drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
+            useMetalRenderer = true
+
+            // Draw cursor via CoreText on top of the Metal layer
+            if let cg = NSGraphicsContext.current?.cgContext {
+                drawCursor(in: cg, cellSize: cellSize)
+            }
+        } else {
+            // Hide metal layer when using CoreText
+            metalLayer?.isHidden = true
+            useMetalRenderer = false
+            drawWithCoreText(dirtyRect: dirtyRect, cellSize: cellSize)
+        }
+    }
+
+    // MARK: - CoreText Draw Path
+
+    private func drawWithCoreText(dirtyRect: NSRect, cellSize: CGSize) {
+        let startTime = CACurrentMediaTime()
+
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
 
         let bg = nsColor(rgb: snapshot.defaultBackground)
         cg.setFillColor(bg.cgColor)
         cg.fill(bounds)
 
-        let cellSize = measureCell()
         let textYOffset = max(0, floor((cellSize.height - font.boundingRectForFont.height) / 2.0))
 
-        // 1) Draw cell backgrounds by highlight runs (required for statusline visibility).
+        // 1) Draw cell backgrounds by highlight runs.
         for row in 0..<snapshot.rows {
             var col = 0
             while col < snapshot.cols {
@@ -193,10 +313,7 @@ final class EditorGridNSView: NSView {
             }
         }
 
-        // 2) Draw text per cell in flipped coordinates for pixel-stable placement.
-        //    Box-drawing characters are skipped here and rendered in step 3.
-        //    Each cell is clipped to its rect to prevent glyph overhang from
-        //    bleeding into adjacent cells (e.g. italic, cascaded fallback fonts).
+        // 2) Draw text per cell.
         for row in 0..<snapshot.rows {
             for col in 0..<snapshot.cols {
                 let cell = snapshot.cells[row][col]
@@ -228,10 +345,123 @@ final class EditorGridNSView: NSView {
             }
         }
 
-        // 3) Owner-draw box-drawing / line-drawing characters as CGContext paths.
+        // 3) Owner-draw box-drawing characters.
         drawBoxDrawingCharacters(in: cg, cellSize: cellSize)
 
         drawCursor(in: cg, cellSize: cellSize)
+
+        coreTextBenchmark.record(CACurrentMediaTime() - startTime)
+    }
+
+    // MARK: - Metal Draw Path
+
+    private func drawWithMetal(atlas: MetalGlyphAtlas, layer: CAMetalLayer, cellSize: CGSize) {
+        let startTime = CACurrentMediaTime()
+
+        // Update layer size to match view
+        let scale = window?.backingScaleFactor ?? 2.0
+        let drawableSize = CGSize(
+            width: bounds.width * scale,
+            height: bounds.height * scale
+        )
+        layer.frame = bounds
+        layer.drawableSize = drawableSize
+        layer.contentsScale = scale
+        layer.isHidden = false
+
+        // Update atlas cell metrics
+        atlas.measureCellSize(font: font as CTFont)
+
+        // Rasterise all visible glyphs and build instance buffer
+        let instances = buildMetalInstances(atlas: atlas, cellSize: cellSize)
+
+        guard let drawable = layer.nextDrawable() else { return }
+
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = drawable.texture
+        passDescriptor.colorAttachments[0].loadAction = .clear
+
+        // Clear to default background
+        let bgR = Float((snapshot.defaultBackground >> 16) & 0xFF) / 255.0
+        let bgG = Float((snapshot.defaultBackground >> 8) & 0xFF) / 255.0
+        let bgB = Float(snapshot.defaultBackground & 0xFF) / 255.0
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: Double(bgR), green: Double(bgG), blue: Double(bgB), alpha: 1.0
+        )
+        passDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let commandBuffer = atlas.commandQueue?.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+            return
+        }
+
+        atlas.draw(
+            instances: instances,
+            viewportSize: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height)),
+            renderEncoder: encoder
+        )
+
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+
+        metalBenchmark.record(CACurrentMediaTime() - startTime)
+    }
+
+    private func buildMetalInstances(atlas: MetalGlyphAtlas, cellSize: CGSize) -> [CellInstance] {
+        let ctFont = font as CTFont
+        var flatCells: [(glyph: GlyphKey, fg: (Float, Float, Float, Float), bg: (Float, Float, Float, Float))] = []
+        flatCells.reserveCapacity(snapshot.rows * snapshot.cols)
+
+        for row in 0..<snapshot.rows {
+            for col in 0..<snapshot.cols {
+                let cell = snapshot.cells[row][col]
+                let hlAttrs = snapshot.highlights[cell.highlightID]
+
+                // Resolve colors with reverse support
+                let fgRGB: UInt32
+                let bgRGB: UInt32
+                if hlAttrs?.reverse == true {
+                    fgRGB = hlAttrs?.background ?? snapshot.defaultBackground
+                    bgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                } else {
+                    fgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                    bgRGB = hlAttrs?.background ?? snapshot.defaultBackground
+                }
+
+                let fg = rgbToFloats(fgRGB)
+                let bg = rgbToFloats(bgRGB)
+
+                let text = cell.text
+                let glyphKey: GlyphKey
+                if text.isEmpty || text == " " || cell.isDoubleWidthContinuation {
+                    // Blank cell — no glyph
+                    glyphKey = GlyphKey(characters: "", bold: false, italic: false, fontSize: font.pointSize)
+                } else {
+                    let bold = hlAttrs?.bold ?? false
+                    let italic = hlAttrs?.italic ?? false
+                    glyphKey = GlyphKey(characters: text, bold: bold, italic: italic, fontSize: font.pointSize)
+
+                    // Ensure the glyph is in the atlas
+                    atlas.rasterise(glyphKey, font: ctFont)
+                }
+
+                flatCells.append((glyph: glyphKey, fg: fg, bg: bg))
+            }
+        }
+
+        return atlas.buildInstanceBuffer(
+            cells: flatCells,
+            columns: snapshot.cols,
+            rows: snapshot.rows
+        )
+    }
+
+    private func rgbToFloats(_ rgb: UInt32) -> (Float, Float, Float, Float) {
+        let r = Float((rgb >> 16) & 0xFF) / 255.0
+        let g = Float((rgb >> 8) & 0xFF) / 255.0
+        let b = Float(rgb & 0xFF) / 255.0
+        return (r, g, b, 1.0)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -278,6 +508,16 @@ final class EditorGridNSView: NSView {
         sendMouseEvent(button: "middle", action: "drag", event: event)
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        sendMouseMoveEvent(location: location, flags: event.modifierFlags)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        lastHoveredCell = nil
+        super.mouseExited(with: event)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         let action: String
@@ -296,6 +536,7 @@ final class EditorGridNSView: NSView {
     }
 
     private func drawCursor(in cg: CGContext, cellSize: CGSize) {
+        guard snapshot.drawBaseCursor else { return }
         if shouldBlinkCursor && !cursorBlinkVisible {
             return
         }
@@ -408,6 +649,11 @@ final class EditorGridNSView: NSView {
             return
         }
 
+        let previous = lastReportedCellSize.map { "\($0.cols)x\($0.rows)" } ?? "nil"
+        let cellWidth = String(format: "%.2f", cell.width)
+        let cellHeight = String(format: "%.2f", cell.height)
+        Self.resizeDebugLog("[NSView] bounds=\(Int(bounds.width))x\(Int(bounds.height)) cell=\(cellWidth)x\(cellHeight) reported=\(cols)x\(rows) previous=\(previous)")
+
         lastReportedCellSize = (cols, rows)
         requestResize?(cols, rows)
     }
@@ -425,19 +671,75 @@ final class EditorGridNSView: NSView {
     ) {
         guard let cell = cellCoordinates(at: location) else { return }
         let modifiers = mouseModifierString(flags: flags)
-        sendMouseInput?(button, action, modifiers, cell.row, cell.col)
+        Self.mouseDebugLog("[NSView] action=\(button):\(action) point=\(Int(location.x)),\(Int(location.y)) grid=\(cell.gridID) row=\(cell.row) col=\(cell.col) mods=\(modifiers)")
+        sendMouseInput?(button, action, modifiers, cell.row, cell.col, cell.gridID)
     }
 
-    private func cellCoordinates(at location: CGPoint) -> (row: Int, col: Int)? {
+    private func sendMouseMoveEvent(location: CGPoint, flags: NSEvent.ModifierFlags) {
+        guard let cell = cellCoordinates(at: location) else {
+            lastHoveredCell = nil
+            return
+        }
+
+        if let lastHoveredCell,
+           lastHoveredCell.row == cell.row,
+           lastHoveredCell.col == cell.col,
+           lastHoveredCell.gridID == cell.gridID {
+            return
+        }
+
+        lastHoveredCell = cell
+        let modifiers = mouseModifierString(flags: flags)
+        Self.mouseDebugLog("[NSView] action=move point=\(Int(location.x)),\(Int(location.y)) grid=\(cell.gridID) row=\(cell.row) col=\(cell.col) mods=\(modifiers)")
+        sendMouseInput?("move", "", modifiers, cell.row, cell.col, cell.gridID)
+    }
+
+    private func cellCoordinates(at location: CGPoint) -> (row: Int, col: Int, gridID: Int)? {
         let cell = measureCell()
         guard cell.width > 0, cell.height > 0 else { return nil }
+
+        for layer in snapshot.layers.sorted(by: { lhs, rhs in
+            if lhs.isFloating != rhs.isFloating {
+                return lhs.isFloating && !rhs.isFloating
+            }
+            if lhs.zIndex != rhs.zIndex {
+                return lhs.zIndex > rhs.zIndex
+            }
+            return lhs.id > rhs.id
+        }) {
+            let minX = CGFloat(layer.originCol) * cell.width
+            let minY = CGFloat(layer.originRow) * cell.height
+            let rect = CGRect(
+                x: minX,
+                y: minY,
+                width: CGFloat(layer.cols) * cell.width,
+                height: CGFloat(layer.rows) * cell.height
+            )
+            guard rect.contains(location) else { continue }
+            if layer.isFloating && !layer.mouseEnabled {
+                Self.mouseDebugLog("[HitTest] skipping non-mouse layer=\(layer.id) z=\(layer.zIndex)")
+                continue
+            }
+
+            let col = Int(floor((location.x - rect.minX) / cell.width))
+            let row = Int(floor((location.y - rect.minY) / cell.height))
+            guard row >= 0, col >= 0 else { continue }
+            Self.mouseDebugLog("[HitTest] layer=\(layer.id) floating=\(layer.isFloating) mouseEnabled=\(layer.mouseEnabled) z=\(layer.zIndex) rect=(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height)) point=\(Int(location.x)),\(Int(location.y)) local=\(row),\(col)")
+            return (
+                row: min(max(0, row), max(0, layer.rows - 1)),
+                col: min(max(0, col), max(0, layer.cols - 1)),
+                gridID: layer.id
+            )
+        }
 
         let col = Int(floor(location.x / cell.width))
         let row = Int(floor(location.y / cell.height))
         guard row >= 0, col >= 0 else { return nil }
+        Self.mouseDebugLog("[HitTest] root point=\(Int(location.x)),\(Int(location.y)) local=\(row),\(col)")
         return (
             row: min(max(0, row), max(0, snapshot.rows - 1)),
-            col: min(max(0, col), max(0, snapshot.cols - 1))
+            col: min(max(0, col), max(0, snapshot.cols - 1)),
+            gridID: 0
         )
     }
 
@@ -590,7 +892,6 @@ final class EditorGridNSView: NSView {
                         }
                     }
                     if info.up || info.down {
-                        // Flipped: up = minY, down = maxY
                         if info.up {
                             cg.move(to: CGPoint(x: cx - offset, y: cellRect.minY))
                             cg.addLine(to: CGPoint(x: cx - offset, y: info.down ? cellRect.maxY : cy))
@@ -624,9 +925,6 @@ final class EditorGridNSView: NSView {
         cx: CGFloat,
         cy: CGFloat
     ) {
-        // Flipped coordinates: Y increases downward.
-        // Grid "up" (smaller row index) = minY.
-        // Grid "down" (larger row index) = maxY.
         if info.left {
             cg.move(to: CGPoint(x: cellRect.minX, y: cy))
             cg.addLine(to: CGPoint(x: cx, y: cy))
@@ -656,14 +954,11 @@ final class EditorGridNSView: NSView {
         cx: CGFloat,
         cy: CGFloat
     ) {
-        // For rounded corners (╭╮╯╰), draw an arc connecting the two segments.
-        // The radius is the smaller of half-width and half-height, capped for aesthetics.
         let halfW = cellRect.width / 2
         let halfH = cellRect.height / 2
         let radius = min(halfW, halfH)
 
         if info.right && info.down {
-            // ╭ — arc from down-segment end to right-segment end
             cg.move(to: CGPoint(x: cx, y: cellRect.maxY))
             cg.addLine(to: CGPoint(x: cx, y: cy + radius))
             cg.addArc(center: CGPoint(x: cx + radius, y: cy + radius),
@@ -674,7 +969,6 @@ final class EditorGridNSView: NSView {
             cg.addLine(to: CGPoint(x: cellRect.maxX, y: cy))
             cg.strokePath()
         } else if info.left && info.down {
-            // ╮ — arc from left-segment end to down-segment end
             cg.move(to: CGPoint(x: cellRect.minX, y: cy))
             cg.addLine(to: CGPoint(x: cx - radius, y: cy))
             cg.addArc(center: CGPoint(x: cx - radius, y: cy + radius),
@@ -685,7 +979,6 @@ final class EditorGridNSView: NSView {
             cg.addLine(to: CGPoint(x: cx, y: cellRect.maxY))
             cg.strokePath()
         } else if info.left && info.up {
-            // ╯ — arc from up-segment end to left-segment end
             cg.move(to: CGPoint(x: cx, y: cellRect.minY))
             cg.addLine(to: CGPoint(x: cx, y: cy - radius))
             cg.addArc(center: CGPoint(x: cx - radius, y: cy - radius),
@@ -696,7 +989,6 @@ final class EditorGridNSView: NSView {
             cg.addLine(to: CGPoint(x: cellRect.minX, y: cy))
             cg.strokePath()
         } else if info.right && info.up {
-            // ╰ — arc from right-segment end to up-segment end
             cg.move(to: CGPoint(x: cellRect.maxX, y: cy))
             cg.addLine(to: CGPoint(x: cx + radius, y: cy))
             cg.addArc(center: CGPoint(x: cx + radius, y: cy - radius),
@@ -768,6 +1060,17 @@ final class EditorGridNSView: NSView {
         }
     }
 
+    // MARK: - Benchmark Stats
+
+    /// Returns benchmark stats for the currently active renderer.
+    var renderStats: (renderer: String, avgMs: Double, p95Ms: Double, samples: Int) {
+        if useMetalRenderer {
+            return ("Metal", metalBenchmark.averageMs, metalBenchmark.p95Ms, metalBenchmark.sampleCount)
+        } else {
+            return ("CoreText", coreTextBenchmark.averageMs, coreTextBenchmark.p95Ms, coreTextBenchmark.sampleCount)
+        }
+    }
+
     private func removeWindowFocusObservers() {
         if let observer = windowBecameKeyObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -782,72 +1085,48 @@ final class EditorGridNSView: NSView {
 
 // MARK: - Box-Drawing Character Lookup
 
-/// Maps Unicode box-drawing characters (U+2500–U+257F) and rounded-corner
-/// characters (U+256D–U+2570) to their segment connectivity so the grid
-/// renderer can owner-draw them as CGContext paths instead of font glyphs.
 enum BoxDrawing {
 
     struct Info {
-        /// Whether a line extends to the left edge of the cell.
         let left: Bool
-        /// Whether a line extends to the right edge of the cell.
         let right: Bool
-        /// Whether a line extends to the top edge of the cell.
         let up: Bool
-        /// Whether a line extends to the bottom edge of the cell.
         let down: Bool
-        /// Whether this is a rounded corner (use arc instead of mitre).
         let rounded: Bool
-        /// Whether the line should be drawn with heavy (thick) weight.
         let heavy: Bool
-        /// Whether the character uses double-line style.
         let double: Bool
-        /// Whether the character uses dashed-line style.
         let dashed: Bool
 
         init(
-            left: Bool = false,
-            right: Bool = false,
-            up: Bool = false,
-            down: Bool = false,
-            rounded: Bool = false,
-            heavy: Bool = false,
-            double: Bool = false,
-            dashed: Bool = false
+            left: Bool = false, right: Bool = false,
+            up: Bool = false, down: Bool = false,
+            rounded: Bool = false, heavy: Bool = false,
+            double: Bool = false, dashed: Bool = false
         ) {
-            self.left = left
-            self.right = right
-            self.up = up
-            self.down = down
-            self.rounded = rounded
-            self.heavy = heavy
-            self.double = double
-            self.dashed = dashed
+            self.left = left; self.right = right
+            self.up = up; self.down = down
+            self.rounded = rounded; self.heavy = heavy
+            self.double = double; self.dashed = dashed
         }
     }
 
-    /// Returns segment info for a box-drawing character, or `nil` if
-    /// the string is not a recognized box-drawing character.
     static func info(for text: String) -> Info? {
         guard let scalar = text.unicodeScalars.first,
               text.unicodeScalars.count == 1 else { return nil }
         return table[scalar]
     }
 
-    // Light lines
-    private static let h   = Info(left: true, right: true)                       // ─
-    private static let v   = Info(up: true, down: true)                          // │
-    private static let dr  = Info(right: true, down: true)                       // ┌
-    private static let dl  = Info(left: true, down: true)                        // ┐
-    private static let ur  = Info(right: true, up: true)                         // └
-    private static let ul  = Info(left: true, up: true)                          // ┘
-    private static let vr  = Info(right: true, up: true, down: true)             // ├
-    private static let vl  = Info(left: true, up: true, down: true)              // ┤
-    private static let dh  = Info(left: true, right: true, down: true)           // ┬
-    private static let uh  = Info(left: true, right: true, up: true)             // ┴
-    private static let vh  = Info(left: true, right: true, up: true, down: true) // ┼
-
-    // Heavy lines
+    private static let h   = Info(left: true, right: true)
+    private static let v   = Info(up: true, down: true)
+    private static let dr  = Info(right: true, down: true)
+    private static let dl  = Info(left: true, down: true)
+    private static let ur  = Info(right: true, up: true)
+    private static let ul  = Info(left: true, up: true)
+    private static let vr  = Info(right: true, up: true, down: true)
+    private static let vl  = Info(left: true, up: true, down: true)
+    private static let dh  = Info(left: true, right: true, down: true)
+    private static let uh  = Info(left: true, right: true, up: true)
+    private static let vh  = Info(left: true, right: true, up: true, down: true)
     private static let hH  = Info(left: true, right: true, heavy: true)
     private static let vH  = Info(up: true, down: true, heavy: true)
     private static let drH = Info(right: true, down: true, heavy: true)
@@ -859,118 +1138,70 @@ enum BoxDrawing {
     private static let dhH = Info(left: true, right: true, down: true, heavy: true)
     private static let uhH = Info(left: true, right: true, up: true, heavy: true)
     private static let vhH = Info(left: true, right: true, up: true, down: true, heavy: true)
-
-    // Double lines
     private static let hD  = Info(left: true, right: true, double: true)
     private static let vD  = Info(up: true, down: true, double: true)
-
-    // Rounded corners
-    private static let rDR = Info(right: true, down: true, rounded: true)  // ╭
-    private static let rDL = Info(left: true, down: true, rounded: true)   // ╮
-    private static let rUL = Info(left: true, up: true, rounded: true)     // ╯
-    private static let rUR = Info(right: true, up: true, rounded: true)    // ╰
-
-    // Dashed lines
+    private static let rDR = Info(right: true, down: true, rounded: true)
+    private static let rDL = Info(left: true, down: true, rounded: true)
+    private static let rUL = Info(left: true, up: true, rounded: true)
+    private static let rUR = Info(right: true, up: true, rounded: true)
     private static let hDash = Info(left: true, right: true, dashed: true)
     private static let vDash = Info(up: true, down: true, dashed: true)
     private static let hDashH = Info(left: true, right: true, heavy: true, dashed: true)
     private static let vDashH = Info(up: true, down: true, heavy: true, dashed: true)
 
-    /// Lookup table mapping Unicode scalars to their box-drawing segment info.
     private static let table: [Unicode.Scalar: Info] = [
-        // ── Light box drawing ──────────────────────────────────────────
-        "\u{2500}": h,    // ─  BOX DRAWINGS LIGHT HORIZONTAL
-        "\u{2502}": v,    // │  BOX DRAWINGS LIGHT VERTICAL
-        "\u{250C}": dr,   // ┌  BOX DRAWINGS LIGHT DOWN AND RIGHT
-        "\u{2510}": dl,   // ┐  BOX DRAWINGS LIGHT DOWN AND LEFT
-        "\u{2514}": ur,   // └  BOX DRAWINGS LIGHT UP AND RIGHT
-        "\u{2518}": ul,   // ┘  BOX DRAWINGS LIGHT UP AND LEFT
-        "\u{251C}": vr,   // ├  BOX DRAWINGS LIGHT VERTICAL AND RIGHT
-        "\u{2524}": vl,   // ┤  BOX DRAWINGS LIGHT VERTICAL AND LEFT
-        "\u{252C}": dh,   // ┬  BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
-        "\u{2534}": uh,   // ┴  BOX DRAWINGS LIGHT UP AND HORIZONTAL
-        "\u{253C}": vh,   // ┼  BOX DRAWINGS LIGHT VERTICAL AND HORIZONTAL
-
-        // ── Heavy box drawing ──────────────────────────────────────────
-        "\u{2501}": hH,   // ━  BOX DRAWINGS HEAVY HORIZONTAL
-        "\u{2503}": vH,   // ┃  BOX DRAWINGS HEAVY VERTICAL
-        "\u{250F}": drH,  // ┏  BOX DRAWINGS HEAVY DOWN AND RIGHT
-        "\u{2513}": dlH,  // ┓  BOX DRAWINGS HEAVY DOWN AND LEFT
-        "\u{2517}": urH,  // ┗  BOX DRAWINGS HEAVY UP AND RIGHT
-        "\u{251B}": ulH,  // ┛  BOX DRAWINGS HEAVY UP AND LEFT
-        "\u{2523}": vrH,  // ┣  BOX DRAWINGS HEAVY VERTICAL AND RIGHT
-        "\u{252B}": vlH,  // ┫  BOX DRAWINGS HEAVY VERTICAL AND LEFT
-        "\u{2533}": dhH,  // ┳  BOX DRAWINGS HEAVY DOWN AND HORIZONTAL
-        "\u{253B}": uhH,  // ┻  BOX DRAWINGS HEAVY UP AND HORIZONTAL
-        "\u{254B}": vhH,  // ╋  BOX DRAWINGS HEAVY VERTICAL AND HORIZONTAL
-
-        // ── Double box drawing ─────────────────────────────────────────
-        "\u{2550}": hD,   // ═  BOX DRAWINGS DOUBLE HORIZONTAL
-        "\u{2551}": vD,   // ║  BOX DRAWINGS DOUBLE VERTICAL
-
-        // ── Rounded corners ────────────────────────────────────────────
-        "\u{256D}": rDR,  // ╭  BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
-        "\u{256E}": rDL,  // ╮  BOX DRAWINGS LIGHT ARC DOWN AND LEFT
-        "\u{256F}": rUL,  // ╯  BOX DRAWINGS LIGHT ARC UP AND LEFT
-        "\u{2570}": rUR,  // ╰  BOX DRAWINGS LIGHT ARC UP AND RIGHT
-
-        // ── Dashed lines ───────────────────────────────────────────────
-        "\u{2504}": hDash,  // ┄  BOX DRAWINGS LIGHT TRIPLE DASH HORIZONTAL
-        "\u{2505}": hDashH, // ┅  BOX DRAWINGS HEAVY TRIPLE DASH HORIZONTAL
-        "\u{2506}": vDash,  // ┆  BOX DRAWINGS LIGHT TRIPLE DASH VERTICAL
-        "\u{2507}": vDashH, // ┇  BOX DRAWINGS HEAVY TRIPLE DASH VERTICAL
-        "\u{2508}": hDash,  // ┈  BOX DRAWINGS LIGHT QUADRUPLE DASH HORIZONTAL
-        "\u{2509}": hDashH, // ┉  BOX DRAWINGS HEAVY QUADRUPLE DASH HORIZONTAL
-        "\u{250A}": vDash,  // ┊  BOX DRAWINGS LIGHT QUADRUPLE DASH VERTICAL
-        "\u{250B}": vDashH, // ┋  BOX DRAWINGS HEAVY QUADRUPLE DASH VERTICAL
-
-        // ── Mixed light/heavy (common subset) ─────────────────────────
-        "\u{250D}": Info(right: true, down: true, heavy: false),  // ┍
-        "\u{250E}": Info(right: true, down: true, heavy: false),  // ┎
-        "\u{2511}": Info(left: true, down: true, heavy: false),   // ┑
-        "\u{2512}": Info(left: true, down: true, heavy: false),   // ┒
-        "\u{2515}": Info(right: true, up: true, heavy: false),    // ┕
-        "\u{2516}": Info(right: true, up: true, heavy: false),    // ┖
-        "\u{2519}": Info(left: true, up: true, heavy: false),     // ┙
-        "\u{251A}": Info(left: true, up: true, heavy: false),     // ┚
-        "\u{251D}": Info(right: true, up: true, down: true),      // ┝
-        "\u{251E}": Info(right: true, up: true, down: true),      // ┞
-        "\u{251F}": Info(right: true, up: true, down: true),      // ┟
-        "\u{2520}": Info(right: true, up: true, down: true, heavy: true), // ┠
-        "\u{2521}": Info(right: true, up: true, down: true),      // ┡
-        "\u{2522}": Info(right: true, up: true, down: true),      // ┢
-        "\u{2525}": Info(left: true, up: true, down: true),       // ┥
-        "\u{2526}": Info(left: true, up: true, down: true),       // ┦
-        "\u{2527}": Info(left: true, up: true, down: true),       // ┧
-        "\u{2528}": Info(left: true, up: true, down: true, heavy: true), // ┨
-        "\u{2529}": Info(left: true, up: true, down: true),       // ┩
-        "\u{252A}": Info(left: true, up: true, down: true),       // ┪
-        "\u{252D}": Info(left: true, right: true, down: true),    // ┭
-        "\u{252E}": Info(left: true, right: true, down: true),    // ┮
-        "\u{252F}": Info(left: true, right: true, down: true),    // ┯
-        "\u{2530}": Info(left: true, right: true, down: true),    // ┰
-        "\u{2531}": Info(left: true, right: true, down: true),    // ┱
-        "\u{2532}": Info(left: true, right: true, down: true),    // ┲
-        "\u{2535}": Info(left: true, right: true, up: true),      // ┵
-        "\u{2536}": Info(left: true, right: true, up: true),      // ┶
-        "\u{2537}": Info(left: true, right: true, up: true),      // ┷
-        "\u{2538}": Info(left: true, right: true, up: true),      // ┸
-        "\u{2539}": Info(left: true, right: true, up: true),      // ┹
-        "\u{253A}": Info(left: true, right: true, up: true),      // ┺
-        "\u{253D}": Info(left: true, right: true, up: true, down: true), // ┽
-        "\u{253E}": Info(left: true, right: true, up: true, down: true), // ┾
-        "\u{253F}": Info(left: true, right: true, up: true, down: true), // ┿
-        "\u{2540}": Info(left: true, right: true, up: true, down: true), // ╀
-        "\u{2541}": Info(left: true, right: true, up: true, down: true), // ╁
-        "\u{2542}": Info(left: true, right: true, up: true, down: true, heavy: true), // ╂
-        "\u{2543}": Info(left: true, right: true, up: true, down: true), // ╃
-        "\u{2544}": Info(left: true, right: true, up: true, down: true), // ╄
-        "\u{2545}": Info(left: true, right: true, up: true, down: true), // ╅
-        "\u{2546}": Info(left: true, right: true, up: true, down: true), // ╆
-        "\u{2547}": Info(left: true, right: true, up: true, down: true), // ╇
-        "\u{2548}": Info(left: true, right: true, up: true, down: true), // ╈
-        "\u{2549}": Info(left: true, right: true, up: true, down: true), // ╉
-        "\u{254A}": Info(left: true, right: true, up: true, down: true), // ╊
+        "\u{2500}": h, "\u{2502}": v, "\u{250C}": dr, "\u{2510}": dl,
+        "\u{2514}": ur, "\u{2518}": ul, "\u{251C}": vr, "\u{2524}": vl,
+        "\u{252C}": dh, "\u{2534}": uh, "\u{253C}": vh,
+        "\u{2501}": hH, "\u{2503}": vH, "\u{250F}": drH, "\u{2513}": dlH,
+        "\u{2517}": urH, "\u{251B}": ulH, "\u{2523}": vrH, "\u{252B}": vlH,
+        "\u{2533}": dhH, "\u{253B}": uhH, "\u{254B}": vhH,
+        "\u{2550}": hD, "\u{2551}": vD,
+        "\u{256D}": rDR, "\u{256E}": rDL, "\u{256F}": rUL, "\u{2570}": rUR,
+        "\u{2504}": hDash, "\u{2505}": hDashH, "\u{2506}": vDash, "\u{2507}": vDashH,
+        "\u{2508}": hDash, "\u{2509}": hDashH, "\u{250A}": vDash, "\u{250B}": vDashH,
+        "\u{250D}": Info(right: true, down: true), "\u{250E}": Info(right: true, down: true),
+        "\u{2511}": Info(left: true, down: true), "\u{2512}": Info(left: true, down: true),
+        "\u{2515}": Info(right: true, up: true), "\u{2516}": Info(right: true, up: true),
+        "\u{2519}": Info(left: true, up: true), "\u{251A}": Info(left: true, up: true),
+        "\u{251D}": Info(right: true, up: true, down: true),
+        "\u{251E}": Info(right: true, up: true, down: true),
+        "\u{251F}": Info(right: true, up: true, down: true),
+        "\u{2520}": Info(right: true, up: true, down: true, heavy: true),
+        "\u{2521}": Info(right: true, up: true, down: true),
+        "\u{2522}": Info(right: true, up: true, down: true),
+        "\u{2525}": Info(left: true, up: true, down: true),
+        "\u{2526}": Info(left: true, up: true, down: true),
+        "\u{2527}": Info(left: true, up: true, down: true),
+        "\u{2528}": Info(left: true, up: true, down: true, heavy: true),
+        "\u{2529}": Info(left: true, up: true, down: true),
+        "\u{252A}": Info(left: true, up: true, down: true),
+        "\u{252D}": Info(left: true, right: true, down: true),
+        "\u{252E}": Info(left: true, right: true, down: true),
+        "\u{252F}": Info(left: true, right: true, down: true),
+        "\u{2530}": Info(left: true, right: true, down: true),
+        "\u{2531}": Info(left: true, right: true, down: true),
+        "\u{2532}": Info(left: true, right: true, down: true),
+        "\u{2535}": Info(left: true, right: true, up: true),
+        "\u{2536}": Info(left: true, right: true, up: true),
+        "\u{2537}": Info(left: true, right: true, up: true),
+        "\u{2538}": Info(left: true, right: true, up: true),
+        "\u{2539}": Info(left: true, right: true, up: true),
+        "\u{253A}": Info(left: true, right: true, up: true),
+        "\u{253D}": Info(left: true, right: true, up: true, down: true),
+        "\u{253E}": Info(left: true, right: true, up: true, down: true),
+        "\u{253F}": Info(left: true, right: true, up: true, down: true),
+        "\u{2540}": Info(left: true, right: true, up: true, down: true),
+        "\u{2541}": Info(left: true, right: true, up: true, down: true),
+        "\u{2542}": Info(left: true, right: true, up: true, down: true, heavy: true),
+        "\u{2543}": Info(left: true, right: true, up: true, down: true),
+        "\u{2544}": Info(left: true, right: true, up: true, down: true),
+        "\u{2545}": Info(left: true, right: true, up: true, down: true),
+        "\u{2546}": Info(left: true, right: true, up: true, down: true),
+        "\u{2547}": Info(left: true, right: true, up: true, down: true),
+        "\u{2548}": Info(left: true, right: true, up: true, down: true),
+        "\u{2549}": Info(left: true, right: true, up: true, down: true),
+        "\u{254A}": Info(left: true, right: true, up: true, down: true),
     ]
 }
 

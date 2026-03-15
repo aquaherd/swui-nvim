@@ -24,12 +24,22 @@ import SwiftUI
 /// ```swift
 /// EditorSurface()
 ///     .overlay(alignment: .bottom) {
-///         CmdlineOverlay(session: session)
+///         CmdlineOverlay(
+///             state: session.cmdline,
+///             highlightTable: session.highlightTable,
+///             defaultColors: session.defaultColors
+///         )
 ///     }
 /// ```
-@MainActor
 struct CmdlineOverlay: View {
-    @ObservedObject var session: NvimSession
+    /// The current command line state from the Neovim session.
+    let state: CmdlineState
+
+    /// Highlight table for resolving highlight IDs to colors.
+    let highlightTable: [Int: RawHighlightAttrs]
+
+    /// Default foreground/background colors.
+    let defaultColors: DefaultColors
 
     /// Animation state for the blinking cursor.
     @State private var cursorVisible: Bool = true
@@ -56,10 +66,10 @@ struct CmdlineOverlay: View {
     var showShadow: Bool = true
 
     var body: some View {
-        if session.cmdline.isVisible {
+        if state.isVisible {
             cmdlineBar
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-                .animation(.easeInOut(duration: 0.15), value: session.cmdline.isVisible)
+                .animation(.easeInOut(duration: 0.15), value: state.isVisible)
                 .onAppear { startBlinking() }
                 .onDisappear { stopBlinking() }
         }
@@ -71,24 +81,24 @@ struct CmdlineOverlay: View {
     private var cmdlineBar: some View {
         HStack(spacing: 0) {
             // First character (e.g. ":", "/", "?")
-            if !session.cmdline.firstCharacter.isEmpty {
-                Text(session.cmdline.firstCharacter)
+            if !state.firstCharacter.isEmpty {
+                Text(state.firstCharacter)
                     .font(font)
                     .foregroundStyle(firstCharacterColor)
                     .padding(.trailing, 2)
             }
 
             // Prompt (if any)
-            if !session.cmdline.prompt.isEmpty {
-                Text(session.cmdline.prompt)
+            if !state.prompt.isEmpty {
+                Text(state.prompt)
                     .font(font)
                     .foregroundStyle(promptColor)
                     .padding(.trailing, 4)
             }
 
             // Indent spacing
-            if session.cmdline.indent > 0 {
-                Text(String(repeating: " ", count: session.cmdline.indent))
+            if state.indent > 0 {
+                Text(String(repeating: " ", count: state.indent))
                     .font(font)
             }
 
@@ -100,7 +110,7 @@ struct CmdlineOverlay: View {
         }
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
-        .background(backgroundMaterial)
+        .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -115,8 +125,8 @@ struct CmdlineOverlay: View {
 
     @ViewBuilder
     private var cmdlineContent: some View {
-        let fullText = session.cmdline.text
-        let cursorPos = session.cmdline.position
+        let fullText = state.text
+        let cursorPos = state.position
 
         if fullText.isEmpty {
             // Empty command line — just show the cursor
@@ -124,7 +134,7 @@ struct CmdlineOverlay: View {
         } else {
             // Build the text with cursor inserted at the correct position
             HStack(spacing: 0) {
-                ForEach(Array(contentSegments.enumerated()), id: \.offset) { index, segment in
+                ForEach(Array(contentSegments.enumerated()), id: \.offset) { _, segment in
                     if segment.isCursor {
                         cursorView
                     } else {
@@ -161,8 +171,8 @@ struct CmdlineOverlay: View {
     /// Splits the command line content into segments with a cursor marker
     /// inserted at the correct position.
     private var contentSegments: [ContentSegment] {
-        let content = session.cmdline.content
-        let cursorPos = session.cmdline.position
+        let content = state.content
+        let cursorPos = state.position
 
         guard !content.isEmpty else {
             return [ContentSegment(id: 0, text: "", isCursor: true)]
@@ -250,20 +260,15 @@ struct CmdlineOverlay: View {
 
     /// Resolves the foreground color for a given highlight ID.
     private func foregroundColor(for highlightID: Int) -> Color {
-        let highlightTable = _session.wrappedValue.highlightTable
-        guard let attrs = highlightTable[highlightID] else {
+        guard let attrs = highlightTable[highlightID],
+              let fg = attrs.foreground else {
             return defaultForeground
         }
-
-        if let fg = attrs.foreground {
-            return Color(rgb: fg)
-        }
-        return defaultForeground
+        return Color(rgb: fg)
     }
 
     /// The color for the first character (`:`, `/`, etc.).
     private var firstCharacterColor: Color {
-        // Use a slightly brighter or accent-tinted color for the first char
         .accentColor
     }
 
@@ -274,7 +279,7 @@ struct CmdlineOverlay: View {
 
     /// The default foreground color from Neovim.
     private var defaultForeground: Color {
-        Color(rgb: session.defaultColors.foreground)
+        Color(rgb: defaultColors.foreground)
     }
 
     /// The cursor color — matches the accent or foreground.
@@ -286,27 +291,21 @@ struct CmdlineOverlay: View {
     private var borderColor: Color {
         Color.primary.opacity(0.15)
     }
-
-    /// Background material for the command line bar.
-    private var backgroundMaterial: some ShapeStyle {
-        #if os(macOS)
-        return .ultraThinMaterial
-        #else
-        return .ultraThinMaterial
-        #endif
-    }
 }
 
 // MARK: - Block Command Line
 
 /// A variant overlay for block command-line content (`:lua <<EOF` style).
 /// Renders multi-line content in a larger panel.
-@MainActor
 struct CmdlineBlockOverlay: View {
-    @ObservedObject var session: NvimSession
-
     /// The lines of the block command, each being an array of styled chunks.
     var blockLines: [[(highlightID: Int, text: String)]]
+
+    /// Highlight table for resolving highlight IDs to colors.
+    let highlightTable: [Int: RawHighlightAttrs]
+
+    /// Default foreground/background colors.
+    let defaultColors: DefaultColors
 
     var font: Font = .system(size: 13, weight: .regular, design: .monospaced)
 
@@ -351,10 +350,9 @@ struct CmdlineBlockOverlay: View {
     }
 
     private func chunkColor(highlightID: Int) -> Color {
-        let highlightTable = _session.wrappedValue.highlightTable
         guard let attrs = highlightTable[highlightID],
               let fg = attrs.foreground else {
-            return Color(rgb: _session.wrappedValue.defaultColors.foreground)
+            return Color(rgb: defaultColors.foreground)
         }
         return Color(rgb: fg)
     }

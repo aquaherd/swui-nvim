@@ -13,14 +13,19 @@ let package = Package(
             targets: ["Transport"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
+    ],
     targets: [
         .target(
             name: "Transport",
-            path: "Sources/Transport",
-            exclude: [
-                "LocalTransport.swift",
-                "SSHTransport.swift",
-            ]
+            dependencies: [
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ],
+            path: "Sources/Transport"
         ),
         .testTarget(
             name: "TransportTests",

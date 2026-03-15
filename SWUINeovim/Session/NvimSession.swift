@@ -35,31 +35,11 @@ public enum NvimSessionState: Sendable, Equatable {
     }
 }
 
-// MARK: - Grid Cell
+// MARK: - Raw Highlight Attributes
 
-/// A single cell in the Neovim editor grid.
-public struct GridCell: Sendable, Equatable {
-    /// The text displayed in this cell (usually a single grapheme cluster,
-    /// but may be empty for continuation cells of wide characters).
-    public var text: String
-
-    /// Highlight attribute ID, referencing the highlight table.
-    public var highlightID: Int
-
-    /// Whether this cell is a double-width character's trailing cell.
-    public var isDoubleWidthTrailing: Bool
-
-    public init(text: String = " ", highlightID: Int = 0, isDoubleWidthTrailing: Bool = false) {
-        self.text = text
-        self.highlightID = highlightID
-        self.isDoubleWidthTrailing = isDoubleWidthTrailing
-    }
-}
-
-// MARK: - Highlight Attributes
-
-/// Resolved highlight attributes from `hl_attr_define`.
-public struct HighlightAttributes: Sendable, Equatable {
+/// Raw highlight attributes parsed from `hl_attr_define` msgpack data.
+/// Uses UInt32 color values before platform color resolution.
+public struct RawHighlightAttrs: Sendable, Equatable {
     public var foreground: UInt32?
     public var background: UInt32?
     public var special: UInt32?
@@ -105,8 +85,8 @@ public struct HighlightAttributes: Sendable, Equatable {
     }
 
     /// Parse highlight attributes from a Neovim `hl_attr_define` map.
-    public static func from(msgpack value: MsgPackValue) -> HighlightAttributes {
-        var attrs = HighlightAttributes()
+    public static func from(msgpack value: MsgPackValue) -> RawHighlightAttrs {
+        var attrs = RawHighlightAttrs()
         guard case .map(let dict) = value else { return attrs }
 
         for (key, val) in dict {
@@ -147,41 +127,8 @@ public struct HighlightAttributes: Sendable, Equatable {
     }
 }
 
-// MARK: - Cursor State
-
-/// Current cursor state in the grid.
-public struct CursorState: Sendable, Equatable {
-    public var gridID: Int
-    public var row: Int
-    public var col: Int
-
-    public init(gridID: Int = 1, row: Int = 0, col: Int = 0) {
-        self.gridID = gridID
-        self.row = row
-        self.col = col
-    }
-}
-
-// MARK: - Mode Info
-
-/// Neovim mode information from `mode_info_set` / `mode_change`.
-public struct ModeInfo: Sendable, Equatable {
-    public var name: String
-    public var shortName: String
-    public var cursorShape: CursorShape
-
-    public enum CursorShape: String, Sendable, Equatable {
-        case block
-        case horizontal
-        case vertical
-    }
-
-    public init(name: String = "normal", shortName: String = "n", cursorShape: CursorShape = .block) {
-        self.name = name
-        self.shortName = shortName
-        self.cursorShape = cursorShape
-    }
-}
+// NOTE: CursorState is defined in CursorRenderer.swift
+// NOTE: ModeInfo and CursorShape are defined in NvimUIEvents.swift
 
 // MARK: - Default Colors
 
@@ -485,6 +432,8 @@ public final class Grid: @unchecked Sendable {
 
 // MARK: - Multigrid Window Info
 
+// NOTE: FloatAnchor is defined in NvimUIEvents.swift
+
 /// Position information for a multigrid window.
 public struct WindowPosition: Sendable, Equatable {
     public var gridID: Int
@@ -495,11 +444,15 @@ public struct WindowPosition: Sendable, Equatable {
 
     /// For floating windows only.
     public var isFloating: Bool
+    public var anchor: FloatAnchor
     public var anchorGridID: Int?
     public var anchorRow: Double?
     public var anchorCol: Double?
-    public var focusable: Bool
+    public var mouseEnabled: Bool
     public var zIndex: Int
+    public var compIndex: Int?
+    public var screenRow: Int?
+    public var screenCol: Int?
 
     public init(
         gridID: Int,
@@ -508,11 +461,15 @@ public struct WindowPosition: Sendable, Equatable {
         width: Int = 0,
         height: Int = 0,
         isFloating: Bool = false,
+        anchor: FloatAnchor = .northWest,
         anchorGridID: Int? = nil,
         anchorRow: Double? = nil,
         anchorCol: Double? = nil,
-        focusable: Bool = true,
-        zIndex: Int = 50
+        mouseEnabled: Bool = true,
+        zIndex: Int = 50,
+        compIndex: Int? = nil,
+        screenRow: Int? = nil,
+        screenCol: Int? = nil
     ) {
         self.gridID = gridID
         self.startRow = startRow
@@ -520,11 +477,15 @@ public struct WindowPosition: Sendable, Equatable {
         self.width = width
         self.height = height
         self.isFloating = isFloating
+        self.anchor = anchor
         self.anchorGridID = anchorGridID
         self.anchorRow = anchorRow
         self.anchorCol = anchorCol
-        self.focusable = focusable
+        self.mouseEnabled = mouseEnabled
         self.zIndex = zIndex
+        self.compIndex = compIndex
+        self.screenRow = screenRow
+        self.screenCol = screenCol
     }
 }
 
@@ -552,21 +513,52 @@ public struct WindowPosition: Sendable, Equatable {
 /// ```
 @MainActor
 public final class NvimSession: ObservableObject {
+#if DEBUG
+    private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
+    private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+#else
+    private static let resizeDebugEnabled = false
+    private static let mouseDebugEnabled = false
+#endif
+
+    private static func resizeDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard resizeDebugEnabled else { return }
+        print("[ResizeDebug][NvimSession] \(message())")
+#endif
+    }
+
+    private static func mouseDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard mouseDebugEnabled else { return }
+        print("[MouseDebug][NvimSession] \(message())")
+#endif
+    }
+
     // MARK: - Published State
 
     @Published public private(set) var state: NvimSessionState = .disconnected
     @Published public private(set) var grids: [Int: Grid] = [:]
-    @Published public private(set) var highlightTable: [Int: HighlightAttributes] = [:]
+    @Published public private(set) var highlightTable: [Int: RawHighlightAttrs] = [:]
     @Published public private(set) var defaultColors = DefaultColors()
     @Published public private(set) var cursor = CursorState()
     @Published public private(set) var currentMode = ModeInfo()
     @Published public private(set) var modeInfoList: [ModeInfo] = []
     @Published public private(set) var popupMenu = PopupMenuState()
     @Published public private(set) var cmdline = CmdlineState()
+    @Published public private(set) var cmdlineBlock: [[(highlightID: Int, text: String)]] = []
     @Published public private(set) var messages: [MessageEntry] = []
+    @Published public private(set) var messageHistory: [MessageEntry] = []
+    @Published public private(set) var tooltip = TooltipState()
     @Published public private(set) var windowPositions: [Int: WindowPosition] = [:]
     @Published public private(set) var title: String = ""
     @Published public private(set) var isBusy: Bool = false
+
+    /// Whether the UI should attach with Neovim's multigrid extension.
+    ///
+    /// Renderers that only draw grid 1 should disable this so regular window
+    /// content is rendered onto the root grid instead of secondary grids.
+    public var usesMultigrid: Bool = true
 
     /// The number of grid columns to request from Neovim.
     public var requestedCols: Int = 80
@@ -643,21 +635,21 @@ public final class NvimSession: ObservableObject {
         guard state == .attached || state == .connecting else { return }
         state = .detaching
 
-        readTask?.cancel()
-        readTask = nil
-
-        // Fail all pending requests
-        let pending = pendingRequests
-        pendingRequests.removeAll()
-        for (_, continuation) in pending {
-            continuation.resume(throwing: NvimSessionError.sessionStopped)
-        }
-
         // Try to detach gracefully
         do {
             _ = try await rpcRequest(method: "nvim_ui_detach", params: [])
         } catch {
             // Best effort — transport may already be closed
+        }
+
+        readTask?.cancel()
+        readTask = nil
+
+        // Fail any requests still pending after detach/shutdown.
+        let pending = pendingRequests
+        pendingRequests.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: NvimSessionError.sessionStopped)
         }
 
         await transportStop?()
@@ -674,6 +666,7 @@ public final class NvimSession: ObservableObject {
     ///
     /// - Parameter keys: The key string in Neovim notation (e.g. `"<C-a>"`, `"<D-s>"`).
     public func input(_ keys: String) async throws {
+        dismissVisibleMessagesForUserInput(keys: keys)
         _ = try await rpcRequest(method: "nvim_input", params: [.string(keys)])
     }
 
@@ -694,6 +687,8 @@ public final class NvimSession: ObservableObject {
         gridID: Int = 0,
         modifier: String = ""
     ) async throws {
+        dismissVisibleMessagesForMouseInput(button: button, action: action)
+        Self.mouseDebugLog("rpc inputMouse action=\(button):\(action) grid=\(gridID) row=\(row) col=\(col) modifier=\(modifier)")
         _ = try await rpcRequest(method: "nvim_input_mouse", params: [
             .string(button),
             .string(action),
@@ -711,14 +706,18 @@ public final class NvimSession: ObservableObject {
     ///   - width: New width in columns.
     ///   - height: New height in rows.
     public func tryResize(gridID: Int = 1, width: Int, height: Int) async throws {
-        if grids.keys.contains(where: { _ in true }) && grids.count > 1 {
-            // Multigrid mode
+        Self.resizeDebugLog("rpc tryResize grid=\(gridID) size=\(width)x\(height) usesMultigrid=\(usesMultigrid) grids=\(grids.count)")
+        if gridID != 1 {
+            // Explicit grid resize for external multigrid surfaces.
             _ = try await rpcRequest(method: "nvim_ui_try_resize_grid", params: [
                 .int(Int64(gridID)),
                 .int(Int64(width)),
                 .int(Int64(height)),
             ])
         } else {
+            // Resize the overall UI viewport. Even with ext_multigrid enabled,
+            // this app renders a single root viewport and relies on Neovim to
+            // recompute win_pos/grid layout from the new screen dimensions.
             _ = try await rpcRequest(method: "nvim_ui_try_resize", params: [
                 .int(Int64(width)),
                 .int(Int64(height)),
@@ -733,6 +732,19 @@ public final class NvimSession: ObservableObject {
         _ = try await rpcRequest(method: "nvim_command", params: [.string(cmd)])
     }
 
+    private func dismissVisibleMessagesForUserInput(keys: String) {
+        guard !messages.isEmpty else { return }
+        guard keys != ":" else { return }
+        messages.removeAll()
+    }
+
+    private func dismissVisibleMessagesForMouseInput(button: String, action: String) {
+        guard !messages.isEmpty else { return }
+        guard button != "move" else { return }
+        guard action != "" else { return }
+        messages.removeAll()
+    }
+
     /// Evaluate a Neovim expression and return the result.
     public func eval(_ expr: String) async throws -> MsgPackValue {
         return try await rpcRequest(method: "nvim_eval", params: [.string(expr)])
@@ -743,7 +755,7 @@ public final class NvimSession: ObservableObject {
     private func attachUI() async throws {
         let uiOptions: MsgPackValue = .map([
             .string("ext_linegrid"):  .bool(true),
-            .string("ext_multigrid"): .bool(true),
+            .string("ext_multigrid"): .bool(usesMultigrid),
             .string("ext_popupmenu"): .bool(true),
             .string("ext_cmdline"):   .bool(true),
             .string("ext_messages"):  .bool(true),
@@ -833,13 +845,13 @@ public final class NvimSession: ObservableObject {
 
     private func readLoop() async {
         guard let stream = transportDataStream else { return }
-        var buffer = Data()
+        var buffer = [UInt8]()
 
         do {
             for try await chunk in stream {
                 guard !Task.isCancelled else { break }
 
-                buffer.append(chunk)
+                buffer.append(contentsOf: chunk)
 
                 // Try to consume complete MsgPack values from the buffer
                 while !buffer.isEmpty {
@@ -1010,6 +1022,14 @@ public final class NvimSession: ObservableObject {
             cmdline.isVisible = false
         case "cmdline_pos":
             handleCmdlinePos(args)
+        case "cmdline_special_char":
+            handleCmdlineSpecialChar(args)
+        case "cmdline_block_show":
+            handleCmdlineBlockShow(args)
+        case "cmdline_block_append":
+            handleCmdlineBlockAppend(args)
+        case "cmdline_block_hide":
+            cmdlineBlock.removeAll()
 
         // --- Messages ---
         case "msg_show":
@@ -1018,6 +1038,8 @@ public final class NvimSession: ObservableObject {
             messages.removeAll()
         case "msg_showmode", "msg_showcmd", "msg_ruler":
             break // Could be shown in a status area
+        case "msg_history_show":
+            handleMsgHistoryShow(args)
 
         // --- Misc ---
         case "set_title":
@@ -1053,6 +1075,8 @@ public final class NvimSession: ObservableObject {
               let cols = args[1].intValue.flatMap({ Int(exactly: $0) }),
               let rows = args[2].intValue.flatMap({ Int(exactly: $0) })
         else { return }
+
+        Self.resizeDebugLog("event grid_resize grid=\(gridID) size=\(cols)x\(rows)")
 
         if let grid = grids[gridID] {
             grid.resize(rows: rows, cols: cols)
@@ -1113,7 +1137,7 @@ public final class NvimSession: ObservableObject {
               let hlID = args[0].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        let attrs = HighlightAttributes.from(msgpack: args[1])
+        let attrs = RawHighlightAttrs.from(msgpack: args[1])
         highlightTable[hlID] = attrs
     }
 
@@ -1143,12 +1167,25 @@ public final class NvimSession: ObservableObject {
                 guard let keyStr = key.stringValue else { continue }
                 switch keyStr {
                 case "name":
-                    info.name = val.stringValue ?? "normal"
+                    info.name = val.stringValue ?? ""
                 case "short_name":
-                    info.shortName = val.stringValue ?? "n"
+                    info.shortName = val.stringValue ?? ""
                 case "cursor_shape":
-                    let shape = val.stringValue ?? "block"
-                    info.cursorShape = ModeInfo.CursorShape(rawValue: shape) ?? .block
+                    if let s = val.stringValue { info.cursorShape = CursorShape(from: s) }
+                case "cell_percentage":
+                    info.cellPercentage = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkwait":
+                    info.blinkwait = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkon":
+                    info.blinkon = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "blinkoff":
+                    info.blinkoff = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "attr_id":
+                    info.attrID = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "attr_id_lm":
+                    info.attrIDLm = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
+                case "mouse_shape":
+                    info.mouseShape = val.intValue.flatMap({ Int(exactly: $0) }) ?? 0
                 default:
                     break
                 }
@@ -1179,6 +1216,8 @@ public final class NvimSession: ObservableObject {
               let height = args[5].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
+          Self.resizeDebugLog("event win_pos grid=\(gridID) origin=\(startCol),\(startRow) size=\(width)x\(height)")
+
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
             startRow: startRow,
@@ -1189,35 +1228,93 @@ public final class NvimSession: ObservableObject {
     }
 
     private func handleWinFloatPos(_ args: [MsgPackValue]) {
-        // args: [grid, win, anchor, anchor_grid, anchor_row, anchor_col, focusable, zindex]
+        // args: [grid, win, anchor, anchor_grid, anchor_row, anchor_col, mouse_enabled, zindex, compindex?, screen_row?, screen_col?]
         guard args.count >= 6,
               let gridID = args[0].intValue.flatMap({ Int(exactly: $0) }),
               let anchorGrid = args[3].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
+        let anchorStr = args[2].stringValue ?? "NW"
+        let anchor = FloatAnchor(rawValue: anchorStr) ?? .northWest
         let anchorRow = args[4].doubleValue ?? args[4].intValue.flatMap({ Double($0) }) ?? 0
         let anchorCol = args[5].doubleValue ?? args[5].intValue.flatMap({ Double($0) }) ?? 0
-        let focusable = args.count > 6 ? (args[6].boolValue ?? true) : true
+        let mouseEnabled = args.count > 6 ? (args[6].boolValue ?? true) : true
         let zIndex = args.count > 7 ? (args[7].intValue.flatMap({ Int(exactly: $0) }) ?? 50) : 50
+        let compIndex = args.count > 8 ? args[8].intValue.flatMap({ Int(exactly: $0) }) : nil
+        let screenRow = args.count > 9 ? args[9].intValue.flatMap({ Int(exactly: $0) }) : nil
+        let screenCol = args.count > 10 ? args[10].intValue.flatMap({ Int(exactly: $0) }) : nil
+
+        Self.resizeDebugLog("event win_float_pos grid=\(gridID) anchorGrid=\(anchorGrid) anchor=\(anchor.rawValue) anchorPos=\(anchorCol),\(anchorRow) mouseEnabled=\(mouseEnabled) z=\(zIndex) screen=\(screenCol.map(String.init) ?? "nil"),\(screenRow.map(String.init) ?? "nil")")
 
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
             isFloating: true,
+            anchor: anchor,
             anchorGridID: anchorGrid,
             anchorRow: anchorRow,
             anchorCol: anchorCol,
-            focusable: focusable,
-            zIndex: zIndex
+            mouseEnabled: mouseEnabled,
+            zIndex: zIndex,
+            compIndex: compIndex,
+            screenRow: screenRow,
+            screenCol: screenCol
         )
+
+        // Detect tooltip-like floating windows (hover info, diagnostics).
+        // These are typically small, non-focusable floating windows.
+        // We populate the tooltip state so the TooltipOverlay can display them.
+        if !mouseEnabled, let grid = grids[gridID] {
+            var content: [(highlightID: Int, text: String)] = []
+            for row in 0..<grid.rows {
+                if let rowCells = grid.getRow(row) {
+                    if row > 0 {
+                        content.append((highlightID: 0, text: "\n"))
+                    }
+                    // Group cells by highlight for styled output
+                    var currentText = ""
+                    var currentHL = 0
+                    for cell in rowCells {
+                        if cell.highlightID == currentHL {
+                            currentText += cell.text
+                        } else {
+                            if !currentText.isEmpty {
+                                content.append((highlightID: currentHL, text: currentText))
+                            }
+                            currentText = cell.text
+                            currentHL = cell.highlightID
+                        }
+                    }
+                    if !currentText.isEmpty {
+                        content.append((highlightID: currentHL, text: currentText))
+                    }
+                }
+            }
+
+            tooltip = TooltipState(
+                isVisible: true,
+                content: content,
+                row: Int(anchorRow),
+                col: Int(anchorCol),
+                gridID: anchorGrid
+            )
+        }
     }
 
     private func handleWinHide(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
+        // If this was a tooltip floating window, hide the tooltip
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.mouseEnabled {
+            tooltip.isVisible = false
+        }
         windowPositions.removeValue(forKey: gridID)
     }
 
     private func handleWinClose(_ args: [MsgPackValue]) {
         guard let gridID = args.first?.intValue.flatMap({ Int(exactly: $0) }) else { return }
+        // If this was a tooltip floating window, hide the tooltip
+        if let pos = windowPositions[gridID], pos.isFloating && !pos.mouseEnabled {
+            tooltip.isVisible = false
+        }
         grids.removeValue(forKey: gridID)
         windowPositions.removeValue(forKey: gridID)
     }
@@ -1302,6 +1399,53 @@ public final class NvimSession: ObservableObject {
         cmdline.position = pos
     }
 
+    private func handleCmdlineSpecialChar(_ args: [MsgPackValue]) {
+        // args: [c, shift, level]
+        guard args.count >= 1,
+              let char = args[0].stringValue
+        else { return }
+        // Insert the special character at the cursor position in the command line content
+        var text = cmdline.text
+        let pos = min(cmdline.position, text.count)
+        let insertIndex = text.index(text.startIndex, offsetBy: pos)
+        text.insert(contentsOf: char, at: insertIndex)
+        cmdline.content = [(highlightID: 0, text: text)]
+        cmdline.position = pos + char.count
+    }
+
+    private func handleCmdlineBlockShow(_ args: [MsgPackValue]) {
+        // args: [lines] where lines is [[attr, text], ...]
+        cmdlineBlock.removeAll()
+        guard let linesArr = args.first?.arrayValue else { return }
+
+        for lineVal in linesArr {
+            guard case .array(let chunks) = lineVal else { continue }
+            var line: [(highlightID: Int, text: String)] = []
+            for chunk in chunks {
+                guard case .array(let parts) = chunk, parts.count >= 2,
+                      let hlID = parts[0].intValue.flatMap({ Int(exactly: $0) }),
+                      let text = parts[1].stringValue
+                else { continue }
+                line.append((highlightID: hlID, text: text))
+            }
+            cmdlineBlock.append(line)
+        }
+    }
+
+    private func handleCmdlineBlockAppend(_ args: [MsgPackValue]) {
+        // args: [line] where line is [[attr, text], ...]
+        guard let lineArr = args.first?.arrayValue else { return }
+        var line: [(highlightID: Int, text: String)] = []
+        for chunk in lineArr {
+            guard case .array(let parts) = chunk, parts.count >= 2,
+                  let hlID = parts[0].intValue.flatMap({ Int(exactly: $0) }),
+                  let text = parts[1].stringValue
+            else { continue }
+            line.append((highlightID: hlID, text: text))
+        }
+        cmdlineBlock.append(line)
+    }
+
     // MARK: - Message Handlers
 
     private func handleMsgShow(_ args: [MsgPackValue]) {
@@ -1327,6 +1471,28 @@ public final class NvimSession: ObservableObject {
             messages[messages.count - 1] = entry
         } else {
             messages.append(entry)
+        }
+    }
+
+    private func handleMsgHistoryShow(_ args: [MsgPackValue]) {
+        // args: [entries] where entries is [[kind, content], ...]
+        guard let entriesArr = args.first?.arrayValue else { return }
+        messageHistory.removeAll()
+
+        for entryVal in entriesArr {
+            guard case .array(let parts) = entryVal, parts.count >= 2 else { continue }
+            let kind = parts[0].stringValue ?? ""
+            var content: [(highlightID: Int, text: String)] = []
+            if case .array(let contentParts) = parts[1] {
+                for part in contentParts {
+                    guard case .array(let chunk) = part, chunk.count >= 2,
+                          let hlID = chunk[0].intValue.flatMap({ Int(exactly: $0) }),
+                          let text = chunk[1].stringValue
+                    else { continue }
+                    content.append((highlightID: hlID, text: text))
+                }
+            }
+            messageHistory.append(MessageEntry(kind: kind, content: content))
         }
     }
 
@@ -1371,10 +1537,10 @@ public enum NvimSessionError: Error, LocalizedError, Sendable {
 private final class BufferReader {
     struct IncompleteError: Error {}
 
-    let data: Data
+    let data: [UInt8]
     private(set) var offset: Int = 0
 
-    init(data: Data) {
+    init(data: [UInt8]) {
         self.data = data
     }
 
