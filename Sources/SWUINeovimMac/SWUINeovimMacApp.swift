@@ -117,7 +117,7 @@ private struct SWUINeovimMacRootView: View {
     @State private var didInitializeSession: Bool = false
     @State private var showSSHConnect: Bool = false
     @State private var window: NSWindow?
-    @AppStorage("swuineovim.nvimPath") private var nvimPath: String = "/opt/local/bin/nvim"
+    @AppStorage("swuineovim.nvimPath") private var nvimPath: String = SWUINeovimMacApp.resolvedNvimPath()
     @AppStorage("swuineovim.editorFontName") private var editorFontName: String = "Menlo-Regular"
     @AppStorage("swuineovim.editorFontSize") private var editorFontSize: Double = 14
     @AppStorage("swuineovim.metalEnabled") private var metalEnabled: Bool = true
