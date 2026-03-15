@@ -16,7 +16,7 @@ struct SWUINeovimMacApp: App {
     /// Returns the first nvim binary found in the well-known install locations
     /// for Homebrew (Apple Silicon and Intel) and MacPorts, falling back to the
     /// Homebrew Apple Silicon path if none is found.
-    static func resolvedNvimPath() -> String {
+    nonisolated static func resolvedNvimPath() -> String {
         let candidates = [
             "/opt/homebrew/bin/nvim",   // Homebrew – Apple Silicon
             "/usr/local/bin/nvim",      // Homebrew – Intel
@@ -142,6 +142,7 @@ private struct SWUINeovimMacRootView: View {
                 metalEnabled: metalEnabled
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .zIndex(0)
 
             if !gridSnapshot.layers.isEmpty {
                 MultigridOverlayView(
@@ -150,6 +151,7 @@ private struct SWUINeovimMacRootView: View {
                     fontName: editorFontName,
                     fontSize: editorFontSize
                 )
+                .zIndex(1)
             }
 
             // Layer 2: Popup menu overlay
@@ -177,6 +179,7 @@ private struct SWUINeovimMacRootView: View {
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .topLeading)))
                 .animation(.easeOut(duration: 0.12), value: controller.session.popupMenu.isVisible)
+                .zIndex(2)
             }
 
             // Layer 3: Messages + command line anchored at bottom
@@ -201,6 +204,7 @@ private struct SWUINeovimMacRootView: View {
                     .animation(.easeInOut(duration: 0.15), value: controller.session.cmdline.isVisible)
                 }
             }
+            .zIndex(3)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(

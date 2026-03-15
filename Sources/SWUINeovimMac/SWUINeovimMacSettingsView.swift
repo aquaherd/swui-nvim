@@ -89,9 +89,19 @@ struct SWUINeovimMacSettingsView: View {
 
             #if os(macOS)
             Section("Renderer") {
-                if EditorGridNSView.isMetalAvailable {
+                if EditorGridNSView.isMetalRendererAvailable {
                     Toggle("Use Metal GPU Renderer", isOn: $metalEnabled)
                     Text("Renders the editor grid on the GPU. Disable to fall back to CoreText.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if EditorGridNSView.isMetalAvailable {
+                    HStack {
+                        Text("Metal GPU Renderer")
+                        Spacer()
+                        Text("Unavailable in current build")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("A Metal-capable GPU is present, but the shader pipeline could not be created. CoreText renderer is in use.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
@@ -269,8 +279,6 @@ private struct FontPanelAccessor: NSViewRepresentable {
             let manager = NSFontManager.shared
             manager.target = self
             manager.action = #selector(changeFont(_:))
-            manager.setFilteredAttributes([NSFontDescriptor.AttributeName.fixedAdvance.rawValue: 0],
-                                          withMask: NSFontTraitMask.fixedPitchFontMask)
             NSFontPanel.shared.setPanelFont(seed, isMultiple: false)
             manager.orderFrontFontPanel(nil)
         }

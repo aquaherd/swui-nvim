@@ -15,12 +15,22 @@ using namespace metal;
 // MARK: - Shared Structures
 
 /// Per-cell instance data uploaded from the CPU.
-/// Must match `MetalGlyphAtlas.CellInstance` layout exactly.
+/// Scalar fields are used to match Swift's packed struct layout exactly.
 struct CellInstance {
-    ushort2 gridPosition;   // (column, row) in grid coordinates
-    float4 uv;              // (uvX, uvY, uvWidth, uvHeight) normalised atlas coords
-    float4 fgColor;         // foreground RGBA (linear, premultiplied)
-    float4 bgColor;         // background RGBA (linear, premultiplied)
+    ushort gridX;
+    ushort gridY;
+    float uvX;
+    float uvY;
+    float uvWidth;
+    float uvHeight;
+    float fgR;
+    float fgG;
+    float fgB;
+    float fgA;
+    float bgR;
+    float bgG;
+    float bgB;
+    float bgA;
 };
 
 /// Uniform data passed once per draw call.
@@ -74,7 +84,7 @@ vertex VertexOut glyphVertexShader(
     float2 corner = corners[vertexID];
 
     // Compute pixel position of this vertex
-    float2 cellOrigin = float2(float(cell.gridPosition.x), float(cell.gridPosition.y)) * uniforms.cellSize;
+    float2 cellOrigin = float2(float(cell.gridX), float(cell.gridY)) * uniforms.cellSize;
     float2 pixelPos = cellOrigin + corner * uniforms.cellSize;
 
     // Convert to clip space: [-1, 1] with Y flipped (top = +1, bottom = -1)
@@ -84,18 +94,18 @@ vertex VertexOut glyphVertexShader(
 
     // Compute texture coordinates from the atlas UV rect
     float2 texCoord = float2(
-        cell.uv.x + corner.x * cell.uv.z,   // uvX + corner.x * uvWidth
-        cell.uv.y + corner.y * cell.uv.w     // uvY + corner.y * uvHeight
+        cell.uvX + corner.x * cell.uvWidth,
+        cell.uvY + corner.y * cell.uvHeight
     );
 
     // Determine if this cell has a glyph (non-zero UV size)
-    float hasGlyph = (cell.uv.z > 0.0 && cell.uv.w > 0.0) ? 1.0 : 0.0;
+    float hasGlyph = (cell.uvWidth > 0.0 && cell.uvHeight > 0.0) ? 1.0 : 0.0;
 
     VertexOut out;
     out.position = float4(clipPos, 0.0, 1.0);
     out.texCoord = texCoord;
-    out.fgColor = cell.fgColor;
-    out.bgColor = cell.bgColor;
+    out.fgColor = float4(cell.fgR, cell.fgG, cell.fgB, cell.fgA);
+    out.bgColor = float4(cell.bgR, cell.bgG, cell.bgB, cell.bgA);
     out.hasGlyph = hasGlyph;
 
     return out;
@@ -117,8 +127,8 @@ fragment float4 glyphFragmentShader(
 
     if (in.hasGlyph > 0.5) {
         constexpr sampler atlasSampler(
-            mag_filter::linear,
-            min_filter::linear,
+            mag_filter::nearest,
+            min_filter::nearest,
             address::clamp_to_zero
         );
 

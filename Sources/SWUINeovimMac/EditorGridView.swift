@@ -101,6 +101,12 @@ final class EditorGridNSView: NSView {
     /// Whether the system has a Metal-capable GPU. Checked once at class load time.
     static let isMetalAvailable: Bool = MTLCreateSystemDefaultDevice() != nil
 
+    /// Whether the Metal renderer is actually usable (GPU + shader pipeline).
+    static let isMetalRendererAvailable: Bool = {
+        guard isMetalAvailable, let atlas = MetalGlyphAtlas() else { return false }
+        return atlas.canUseMetalRenderer
+    }()
+
     /// Whether Metal rendering is enabled by user preference (default: true).
     var metalEnabled: Bool = true
 
@@ -159,6 +165,10 @@ final class EditorGridNSView: NSView {
         }
         guard let atlas = MetalGlyphAtlas() else {
             NSLog("[EditorGridNSView] Metal renderer: DISABLED — MetalGlyphAtlas init failed, using CoreText renderer")
+            return
+        }
+        guard atlas.canUseMetalRenderer else {
+            NSLog("[EditorGridNSView] Metal renderer: DISABLED — shader pipeline unavailable, using CoreText renderer")
             return
         }
         NSLog("[EditorGridNSView] Metal renderer: AVAILABLE — GPU: %@", atlas.device.name)
@@ -279,7 +289,7 @@ final class EditorGridNSView: NSView {
             drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
             useMetalRenderer = true
 
-            // Draw cursor via CoreText on top of the Metal layer
+            // Draw cursor via CoreText on top of the Metal layer.
             if let cg = NSGraphicsContext.current?.cgContext {
                 drawCursor(in: cg, cellSize: cellSize)
             }
@@ -456,7 +466,7 @@ final class EditorGridNSView: NSView {
                 }
 
                 let fg = rgbToFloats(fgRGB)
-                let bg = rgbToFloats(bgRGB)
+                let bg = rgbToFloats(bgRGB, alpha: blendAlpha(for: hlAttrs))
 
                 let text = cell.text
                 let glyphKey: GlyphKey
@@ -491,11 +501,17 @@ final class EditorGridNSView: NSView {
         )
     }
 
-    private func rgbToFloats(_ rgb: UInt32) -> (Float, Float, Float, Float) {
+    private func rgbToFloats(_ rgb: UInt32, alpha: Float = 1.0) -> (Float, Float, Float, Float) {
         let r = Float((rgb >> 16) & 0xFF) / 255.0
         let g = Float((rgb >> 8) & 0xFF) / 255.0
         let b = Float(rgb & 0xFF) / 255.0
-        return (r, g, b, 1.0)
+        return (r, g, b, alpha)
+    }
+
+    private func blendAlpha(for style: RawHighlightAttrs?) -> Float {
+        guard let blend = style?.blend else { return 1.0 }
+        let clamped = min(max(blend, 0), 100)
+        return Float(100 - clamped) / 100.0
     }
 
     override func keyDown(with event: NSEvent) {
@@ -808,22 +824,23 @@ final class EditorGridNSView: NSView {
 
     private func backgroundColor(for highlightID: Int) -> NSColor {
         if let style = snapshot.highlights[highlightID] {
+            let alpha = CGFloat(blendAlpha(for: style))
             if style.reverse {
                 let effectiveFG = style.foreground ?? snapshot.defaultForeground
-                return nsColor(rgb: effectiveFG)
+                return nsColor(rgb: effectiveFG, alpha: alpha)
             }
             if let bg = style.background {
-                return nsColor(rgb: bg)
+                return nsColor(rgb: bg, alpha: alpha)
             }
         }
         return nsColor(rgb: snapshot.defaultBackground)
     }
 
-    private func nsColor(rgb: UInt32) -> NSColor {
+    private func nsColor(rgb: UInt32, alpha: CGFloat = 1.0) -> NSColor {
         let r = CGFloat((rgb >> 16) & 0xFF) / 255
         let g = CGFloat((rgb >> 8) & 0xFF) / 255
         let b = CGFloat(rgb & 0xFF) / 255
-        return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+        return NSColor(red: r, green: g, blue: b, alpha: alpha)
     }
 
     private func translate(event: NSEvent) -> String? {

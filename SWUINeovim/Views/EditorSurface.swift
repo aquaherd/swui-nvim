@@ -345,6 +345,8 @@ public class EditorSurfaceView: NSView, NSTextInputClient {
             font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
         }
 
+        font = GlyphFallbackFonts.cascadedPlatformFont(base: font)
+
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: fgColor,
@@ -1019,6 +1021,8 @@ public class EditorSurfaceView: UIView, UIKeyInput, UITextInput {
                 }
             }
         }
+
+        font = GlyphFallbackFonts.cascadedPlatformFont(base: font)
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
