@@ -21,6 +21,43 @@ struct SWUINeovimMacSettingsView: View {
     }
 
     var body: some View {
+        TabView {
+            generalTab
+                .tabItem { Label("General", systemImage: "gear") }
+
+            fontTab
+                .tabItem { Label("Font", systemImage: "textformat") }
+
+            sshTab
+                .tabItem { Label("SSH", systemImage: "network") }
+        }
+        .frame(width: 520)
+        .sheet(isPresented: $showBookmarkEditor) {
+            SSHBookmarkEditorView(
+                bookmark: editingBookmark,
+                onSave: { bookmark in
+                    var updated = sshBookmarks
+                    if let idx = sshBookmarks.firstIndex(where: { $0.id == bookmark.id }) {
+                        updated[idx] = bookmark
+                    } else {
+                        updated.append(bookmark)
+                    }
+                    SSHBookmarkStore.save(updated)
+                    showBookmarkEditor = false
+                },
+                onCancel: {
+                    showBookmarkEditor = false
+                }
+            )
+        }
+        .onAppear {
+            bookmarkLibrary.reload()
+        }
+    }
+
+    // MARK: - General Tab
+
+    private var generalTab: some View {
         Form {
             Section("Neovim") {
                 TextField("nvim path", text: $nvimPath)
@@ -39,6 +76,35 @@ struct SWUINeovimMacSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            #if os(macOS)
+            Section("Renderer") {
+                if EditorGridNSView.isMetalAvailable {
+                    Toggle("Use Metal GPU Renderer", isOn: $metalEnabled)
+                    Text("Renders the editor grid on the GPU. Disable to fall back to CoreText.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text("Metal GPU Renderer")
+                        Spacer()
+                        Text("Not available on this Mac")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("CoreText renderer is in use.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            #endif
+        }
+        .formStyle(.grouped)
+        .padding(12)
+    }
+
+    // MARK: - Font Tab
+
+    private var fontTab: some View {
+        Form {
             Section("Font") {
                 HStack {
                     Text("Current")
@@ -75,28 +141,15 @@ struct SWUINeovimMacSettingsView: View {
                 .frame(width: 0, height: 0)
                 #endif
             }
+        }
+        .formStyle(.grouped)
+        .padding(12)
+    }
 
-            #if os(macOS)
-            Section("Renderer") {
-                if EditorGridNSView.isMetalAvailable {
-                    Toggle("Use Metal GPU Renderer", isOn: $metalEnabled)
-                    Text("Renders the editor grid on the GPU. Disable to fall back to CoreText.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack {
-                        Text("Metal GPU Renderer")
-                        Spacer()
-                        Text("Not available on this Mac")
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("CoreText renderer is in use.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            #endif
+    // MARK: - SSH Tab
 
+    private var sshTab: some View {
+        Form {
             Section("SSH Servers") {
                 if sshBookmarks.isEmpty {
                     Text("No saved servers. Add one to connect remotely.")
@@ -135,28 +188,6 @@ struct SWUINeovimMacSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(12)
-        .frame(width: 520)
-        .sheet(isPresented: $showBookmarkEditor) {
-            SSHBookmarkEditorView(
-                bookmark: editingBookmark,
-                onSave: { bookmark in
-                    var updated = sshBookmarks
-                    if let idx = sshBookmarks.firstIndex(where: { $0.id == bookmark.id }) {
-                        updated[idx] = bookmark
-                    } else {
-                        updated.append(bookmark)
-                    }
-                    SSHBookmarkStore.save(updated)
-                    showBookmarkEditor = false
-                },
-                onCancel: {
-                    showBookmarkEditor = false
-                }
-            )
-        }
-        .onAppear {
-            bookmarkLibrary.reload()
-        }
     }
 
     private var sshBookmarks: [SSHBookmark] {
