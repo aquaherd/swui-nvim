@@ -8,6 +8,7 @@ struct SWUINeovimMacSettingsView: View {
     @AppStorage("swuineovim.nvimPath") private var nvimPath: String = "/opt/local/bin/nvim"
     @AppStorage("swuineovim.editorFontName") private var editorFontName: String = "Menlo-Regular"
     @AppStorage("swuineovim.editorFontSize") private var editorFontSize: Double = 14
+    @AppStorage("swuineovim.metalEnabled") private var metalEnabled: Bool = true
     @Environment(\.colorScheme) private var colorScheme
     @State private var openFontPanelToken: Int = 0
     @State private var fontValidationMessage: String?
@@ -77,20 +78,22 @@ struct SWUINeovimMacSettingsView: View {
 
             #if os(macOS)
             Section("Renderer") {
-                HStack {
-                    Text("Metal GPU Renderer")
-                    Spacer()
-                    if EditorGridNSView.isMetalAvailable {
-                        Text("Available")
-                            .foregroundStyle(.green)
-                    } else {
-                        Text("Unavailable — using CoreText")
+                if EditorGridNSView.isMetalAvailable {
+                    Toggle("Use Metal GPU Renderer", isOn: $metalEnabled)
+                    Text("Renders the editor grid on the GPU. Disable to fall back to CoreText.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text("Metal GPU Renderer")
+                        Spacer()
+                        Text("Not available on this Mac")
                             .foregroundStyle(.secondary)
                     }
+                    Text("CoreText renderer is in use.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
-                Text("Metal is activated automatically for large grids (≥ 200 × 60 cells). Smaller grids use CoreText.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
             #endif
 

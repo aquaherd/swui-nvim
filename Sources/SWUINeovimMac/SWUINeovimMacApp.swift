@@ -100,6 +100,7 @@ private struct SWUINeovimMacRootView: View {
     @AppStorage("swuineovim.nvimPath") private var nvimPath: String = "/opt/local/bin/nvim"
     @AppStorage("swuineovim.editorFontName") private var editorFontName: String = "Menlo-Regular"
     @AppStorage("swuineovim.editorFontSize") private var editorFontSize: Double = 14
+    @AppStorage("swuineovim.metalEnabled") private var metalEnabled: Bool = true
 
     init(initialLaunch: SSHWindowLaunch? = nil) {
         self.initialLaunch = initialLaunch
@@ -117,7 +118,8 @@ private struct SWUINeovimMacRootView: View {
                 controller: controller,
                 snapshot: gridSnapshot,
                 fontName: editorFontName,
-                fontSize: editorFontSize
+                fontSize: editorFontSize,
+                metalEnabled: metalEnabled
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 

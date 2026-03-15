@@ -195,12 +195,8 @@ public final class MetalGlyphAtlas {
         }
     }
 
-    /// Whether the Metal renderer should be used for the given grid dimensions.
-    public func shouldUseMetalRenderer(columns: Int, rows: Int) -> Bool {
-        guard isAvailable else { return false }
-        if config.forceEnabled { return true }
-        return columns * rows >= config.cellCountThreshold
-    }
+    /// Whether the Metal renderer can be used (hardware is capable).
+    public var canUseMetalRenderer: Bool { isAvailable }
 
     // MARK: - Atlas Texture
 

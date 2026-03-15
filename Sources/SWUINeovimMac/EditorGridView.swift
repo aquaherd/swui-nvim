@@ -12,9 +12,11 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
     let snapshot: MacSessionController.GridSnapshot
     let fontName: String
     let fontSize: Double
+    var metalEnabled: Bool = true
 
     func makeNSView(context: Context) -> EditorGridNSView {
         let view = EditorGridNSView()
+        view.metalEnabled = metalEnabled
         view.setEditorFont(name: fontName, size: CGFloat(fontSize))
         view.update(with: snapshot)
         view.sendInput = { keys in
@@ -37,6 +39,7 @@ struct EditorGridViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: EditorGridNSView, context: Context) {
+        nsView.metalEnabled = metalEnabled
         nsView.setEditorFont(name: fontName, size: CGFloat(fontSize))
         nsView.update(with: snapshot)
         nsView.sendInput = { keys in
@@ -94,6 +97,9 @@ final class EditorGridNSView: NSView {
 
     /// Whether the system has a Metal-capable GPU. Checked once at class load time.
     static let isMetalAvailable: Bool = MTLCreateSystemDefaultDevice() != nil
+
+    /// Whether Metal rendering is enabled by user preference (default: true).
+    var metalEnabled: Bool = true
 
     private var metalAtlas: MetalGlyphAtlas?
     private var metalLayer: CAMetalLayer?
@@ -260,11 +266,8 @@ final class EditorGridNSView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let cellSize = measureCell()
 
-        // Decide whether to use Metal for this frame
-        let shouldMetal = metalAtlas?.shouldUseMetalRenderer(
-            columns: snapshot.cols, rows: snapshot.rows
-        ) ?? false
-        let useMetalForFrame = shouldMetal && snapshot.layers.isEmpty
+        // Use Metal when the user has it enabled and the hardware supports it.
+        let useMetalForFrame = metalEnabled && (metalAtlas?.canUseMetalRenderer ?? false)
 
         if useMetalForFrame, let atlas = metalAtlas, let layer = metalLayer {
             drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
