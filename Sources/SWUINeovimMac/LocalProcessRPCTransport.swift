@@ -19,7 +19,7 @@ actor LocalProcessRPCTransport: RPCTransport {
     nonisolated let received: AsyncThrowingStream<Data, Error>
 
     init(
-        nvimPath: String = "/opt/local/bin/nvim",
+        nvimPath: String = SWUINeovimMacApp.resolvedNvimPath(),
         arguments: [String] = ["--embed", "--headless"]
     ) {
         self.nvimPath = nvimPath

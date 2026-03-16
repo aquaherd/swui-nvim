@@ -23,7 +23,7 @@ final class MacSessionController {
     /// in SwiftUI views triggers re-renders at the right time.
     private(set) var flushRevision: Int = 0
 
-    var nvimPath: String = "/opt/local/bin/nvim"
+    var nvimPath: String = SWUINeovimMacApp.resolvedNvimPath()
     var preferredBackground: String = "dark"
     var onRemoteExit: (() -> Void)?
 

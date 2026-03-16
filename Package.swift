@@ -28,9 +28,11 @@ let package = Package(
             exclude: [
                 "App",
                 "Resources",
-                "Rendering/Shaders",
                 "Views/EditorView.swift",
                 "Views/EditorSurface.swift",
+            ],
+            resources: [
+                .copy("Rendering/Shaders/GlyphShader.metal")
             ]
         ),
         .testTarget(

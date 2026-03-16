@@ -188,19 +188,15 @@ public final class MetalGlyphAtlas {
         do {
             try createAtlasTexture()
             try loadPipeline()
-            isAvailable = true
+            isAvailable = pipelineState != nil && atlasTexture != nil
         } catch {
             NSLog("[MetalGlyphAtlas] Failed to initialise: \(error)")
             isAvailable = false
         }
     }
 
-    /// Whether the Metal renderer should be used for the given grid dimensions.
-    public func shouldUseMetalRenderer(columns: Int, rows: Int) -> Bool {
-        guard isAvailable else { return false }
-        if config.forceEnabled { return true }
-        return columns * rows >= config.cellCountThreshold
-    }
+    /// Whether the Metal renderer can be used (hardware is capable).
+    public var canUseMetalRenderer: Bool { isAvailable && pipelineState != nil && atlasTexture != nil }
 
     // MARK: - Atlas Texture
 
@@ -227,11 +223,14 @@ public final class MetalGlyphAtlas {
     // MARK: - Pipeline
 
     private func loadPipeline() throws {
-        // Look for the shader library in the main bundle.
-        // In development, the .metal file is compiled into default.metallib.
-        guard let library = try? device.makeDefaultLibrary() else {
-            // If there's no compiled metallib yet (e.g., first build), we defer.
-            NSLog("[MetalGlyphAtlas] No Metal library found — pipeline will be created on first use.")
+        let library: MTLLibrary
+        if let defaultLibrary = device.makeDefaultLibrary() {
+            library = defaultLibrary
+        } else if let source = loadBundledShaderSource() {
+            library = try device.makeLibrary(source: source, options: nil)
+            NSLog("[MetalGlyphAtlas] Loaded Metal shader source from app resources.")
+        } else {
+            NSLog("[MetalGlyphAtlas] No Metal library found and no bundled shader source was available.")
             return
         }
 
@@ -258,6 +257,22 @@ public final class MetalGlyphAtlas {
         pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
     }
 
+    private func loadBundledShaderSource() -> String? {
+        #if SWIFT_PACKAGE
+        if let url = Bundle.module.url(forResource: "GlyphShader", withExtension: "metal"),
+           let source = try? String(contentsOf: url, encoding: .utf8) {
+            return source
+        }
+        #endif
+
+        if let url = Bundle.main.url(forResource: "GlyphShader", withExtension: "metal"),
+           let source = try? String(contentsOf: url, encoding: .utf8) {
+            return source
+        }
+
+        return nil
+    }
+
     // MARK: - Glyph Rasterisation
 
     /// Measure the cell size for the given font.
@@ -265,12 +280,29 @@ public final class MetalGlyphAtlas {
     /// Should be called whenever the font changes. All glyphs are rasterised
     /// into cells of this size.
     public func measureCellSize(font: CTFont) {
-        let spaceGlyph: [CGGlyph] = [CTFontGetGlyphWithName(font, "space" as CFString)]
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(font, .horizontal, spaceGlyph, &advance, 1)
+        var characters: [UniChar] = [77] // "M"
+        var glyphs = [CGGlyph](repeating: 0, count: 1)
+        var advance = CGSize(width: 0, height: 0)
 
-        cellWidth = ceil(advance.width)
-        cellHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        if CTFontGetGlyphsForCharacters(font, &characters, &glyphs, 1) {
+            _ = CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advance, 1)
+        }
+
+        if advance.width <= 0 {
+            advance.width = CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, nil, 0)
+        }
+
+        if advance.width <= 0 {
+            let fallbackString = NSAttributedString(
+                string: "M",
+                attributes: [.font: font]
+            )
+            let line = CTLineCreateWithAttributedString(fallbackString)
+            advance.width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        }
+
+        cellWidth = max(1, advance.width)
+        cellHeight = max(1, ceil(CTFontGetAscent(font) + CTFontGetDescent(font)))
     }
 
     /// Rasterise a glyph and add it to the atlas if not already present.
@@ -333,9 +365,10 @@ public final class MetalGlyphAtlas {
             return nil
         }
 
-        // Flip coordinates (CoreGraphics has origin at bottom-left)
-        context.translateBy(x: 0, y: CGFloat(glyphHeight))
-        context.scaleBy(x: 1.0, y: -1.0)
+        // CoreGraphics has origin at bottom-left; Metal textures read top-down.
+        // Drawing in the natural CG coordinate system produces a correctly
+        // oriented glyph in the Metal texture (ascenders at the top of the
+        // buffer — first in memory — which Metal reads as y=0).
 
         // Set up for text drawing
         context.setAllowsAntialiasing(true)
@@ -343,63 +376,24 @@ public final class MetalGlyphAtlas {
         context.setAllowsFontSmoothing(true)
         context.setShouldSmoothFonts(true)
 
-        // Draw the glyph in white (the shader will apply the actual foreground color)
-        //
-        // For box-drawing characters, use CGContext path drawing (shared with
-        // CoreTextRenderer) instead of CTLineDraw for pixel-perfect grid alignment.
-        let ascent = CTFontGetAscent(font)
+        let renderFont = GlyphFallbackFonts.cascadedCTFont(base: font)
 
-        if let boxInfo = BoxDrawingLookup.info(for: key.characters) {
-            let cellRect = CGRect(x: 0, y: 0, width: CGFloat(glyphWidth), height: CGFloat(glyphHeight))
-            let cx = cellRect.midX
-            let cy = cellRect.midY
-            let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        // Draw the glyph in white (the shader will apply the actual foreground color).
+        let descent = CTFontGetDescent(renderFont)
+        let attributedString = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
+        CFAttributedStringReplaceString(attributedString, CFRangeMake(0, 0), key.characters as CFString)
+        let fullRange = CFRangeMake(0, CFAttributedStringGetLength(attributedString))
+        CFAttributedStringSetAttribute(attributedString, fullRange, kCTFontAttributeName, renderFont)
 
-            context.setStrokeColor(white)
-            context.setLineCap(.square)
-            context.setLineJoin(.miter)
+        let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        CFAttributedStringSetAttribute(attributedString, fullRange, kCTForegroundColorAttributeName, white)
 
-            let lightWidth: CGFloat = 1.0
-            let heavyWidth: CGFloat = 2.0
-            let w = boxInfo.heavy ? heavyWidth : lightWidth
-            context.setLineWidth(w)
+        let line = CTLineCreateWithAttributedString(attributedString)
 
-            if boxInfo.rounded {
-                BoxDrawingRenderer.drawRoundedCorner(
-                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
-                )
-            } else if boxInfo.dashed {
-                let dashLen = cellRect.width * 0.2
-                context.setLineDash(phase: 0, lengths: [dashLen, dashLen])
-                BoxDrawingRenderer.drawStraightSegments(
-                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
-                )
-                context.setLineDash(phase: 0, lengths: [])
-            } else if boxInfo.double {
-                let offset: CGFloat = 2.0
-                context.setLineWidth(lightWidth)
-                BoxDrawingRenderer.drawDoubleSegments(
-                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy, offset: offset
-                )
-            } else {
-                BoxDrawingRenderer.drawStraightSegments(
-                    info: boxInfo, in: context, cellRect: cellRect, cx: cx, cy: cy
-                )
-            }
-        } else {
-            let attributedString = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
-            CFAttributedStringReplaceString(attributedString, CFRangeMake(0, 0), key.characters as CFString)
-            let fullRange = CFRangeMake(0, CFAttributedStringGetLength(attributedString))
-            CFAttributedStringSetAttribute(attributedString, fullRange, kCTFontAttributeName, font)
-
-            let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
-            CFAttributedStringSetAttribute(attributedString, fullRange, kCTForegroundColorAttributeName, white)
-
-            let line = CTLineCreateWithAttributedString(attributedString)
-
-            context.textPosition = CGPoint(x: 0, y: ascent)
-            CTLineDraw(line, context)
-        }
+        // Place baseline at y=descent so descenders reach y=0 (bottom of CG image)
+        // and ascenders reach y=height (top of CG image → top of Metal texture).
+        context.textPosition = CGPoint(x: 0, y: descent)
+        CTLineDraw(line, context)
 
         // Upload to the atlas texture
         let region = MTLRegion(
@@ -420,7 +414,7 @@ public final class MetalGlyphAtlas {
             width: UInt16(glyphWidth),
             height: UInt16(glyphHeight),
             bearingX: 0,
-            bearingY: Float(ascent),
+            bearingY: Float(CTFontGetAscent(renderFont)),
             advance: Float(cellWidth)
         )
 

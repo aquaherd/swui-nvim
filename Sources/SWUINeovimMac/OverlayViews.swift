@@ -39,12 +39,48 @@ func computeCellSize(fontName: String, fontSize: CGFloat) -> CGSize {
 
 // MARK: - Color Helpers
 
-private func color(rgb: UInt32) -> Color {
+private func color(rgb: UInt32, opacity: Double = 1.0) -> Color {
     Color(
         red: Double((rgb >> 16) & 0xFF) / 255.0,
         green: Double((rgb >> 8) & 0xFF) / 255.0,
         blue: Double(rgb & 0xFF) / 255.0
     )
+    .opacity(opacity)
+}
+
+private func blendOpacity(_ attrs: RawHighlightAttrs?) -> Double {
+    guard let blend = attrs?.blend else { return 1.0 }
+    let clamped = min(max(blend, 0), 100)
+    return Double(100 - clamped) / 100.0
+}
+
+private func overlayFont(
+    name: String? = nil,
+    size: CGFloat,
+    weight: NSFont.Weight = .regular,
+    italic: Bool = false
+) -> Font {
+    let resolvedSize = max(8, size)
+    var base = name.flatMap { NSFont(name: $0, size: resolvedSize) }
+        ?? NSFont.monospacedSystemFont(ofSize: resolvedSize, weight: weight)
+
+    let descriptor = base.fontDescriptor.withSymbolicTraits(symbolicTraits(weight: weight, italic: italic))
+    if let styled = NSFont(descriptor: descriptor, size: resolvedSize) {
+        base = styled
+    }
+
+    return Font(GlyphFallbackFonts.cascadedPlatformFont(base: base))
+}
+
+private func symbolicTraits(weight: NSFont.Weight, italic: Bool) -> NSFontDescriptor.SymbolicTraits {
+    var traits: NSFontDescriptor.SymbolicTraits = []
+    if weight >= .semibold {
+        traits.insert(.bold)
+    }
+    if italic {
+        traits.insert(.italic)
+    }
+    return traits
 }
 
 // MARK: - PopupMenuOverlayView
@@ -155,14 +191,14 @@ struct PopupMenuOverlayView: View {
             // Kind indicator
             if !item.kind.isEmpty {
                 Text(item.kind)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(overlayFont(size: 10, weight: .semibold))
                     .foregroundStyle(kindColor(item.kind))
                     .frame(width: 20, alignment: .center)
             }
 
             // Word
             Text(item.word)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                .font(overlayFont(size: 12, weight: isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
                 .lineLimit(1)
 
@@ -171,7 +207,7 @@ struct PopupMenuOverlayView: View {
             // Menu detail (right-aligned, dimmed)
             if !item.menu.isEmpty {
                 Text(item.menu)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(overlayFont(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -207,7 +243,7 @@ struct MultigridOverlayView: View {
         GeometryReader { _ in
             ZStack(alignment: .topLeading) {
                 ForEach(snapshot.layers) { layer in
-                    if layer.id != 1 {
+                    if layer.id != 1 && layer.isFloating {
                         MultigridLayerView(
                             layer: layer,
                             defaultFG: snapshot.defaultForeground,
@@ -240,7 +276,8 @@ struct MultigridOverlayView: View {
     }
 
     private var cursorLayer: MacSessionController.GridSnapshot.Layer? {
-        snapshot.layers.first(where: { $0.id == snapshot.cursorGridID })
+        // Only draw cursor in overlay if it's on a floating layer
+        snapshot.layers.first(where: { $0.id == snapshot.cursorGridID && $0.isFloating })
     }
 
     @ViewBuilder
@@ -289,10 +326,10 @@ private struct MultigridLayerView: View {
                 )
             }
         }
-        .background(color(rgb: defaultBG))
 
         if layer.isFloating {
             content
+                .background(color(rgb: defaultBG))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -301,6 +338,7 @@ private struct MultigridLayerView: View {
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         } else {
             content
+                .background(color(rgb: defaultBG))
         }
     }
 }
@@ -318,12 +356,15 @@ private struct MultigridRowView: View {
         HStack(spacing: 0) {
             ForEach(Array(textRuns.enumerated()), id: \.offset) { _, run in
                 Text(run.text)
-                    .font(.custom(fontName, size: fontSize))
-                    .fontWeight(run.bold ? .bold : .regular)
-                    .italic(run.italic)
+                    .font(overlayFont(
+                        name: fontName,
+                        size: fontSize,
+                        weight: run.bold ? .bold : .regular,
+                        italic: run.italic
+                    ))
                     .foregroundStyle(run.foreground)
-                    .background(run.background)
                     .frame(width: CGFloat(run.cellCount) * cellSize.width, height: cellSize.height, alignment: .leading)
+                    .background(run.background)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -361,7 +402,7 @@ private struct MultigridRowView: View {
     private func makeRun(text: String, hlID: Int, cellCount: Int) -> MultigridTextRun {
         let attrs = highlightTable[hlID]
         var fg = color(rgb: attrs?.foreground ?? defaultFG)
-        var bg = color(rgb: attrs?.background ?? defaultBG)
+        var bg = color(rgb: attrs?.background ?? defaultBG, opacity: blendOpacity(attrs))
 
         if attrs?.reverse == true {
             swap(&fg, &bg)
@@ -403,7 +444,7 @@ struct CmdlineOverlayView: View {
                 // First character (: / ? !)
                 if !state.firstCharacter.isEmpty {
                     Text(state.firstCharacter)
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .font(overlayFont(size: 14, weight: .bold))
                         .foregroundStyle(firstCharColor)
                         .padding(.trailing, 2)
                 }
@@ -411,7 +452,7 @@ struct CmdlineOverlayView: View {
                 // Prompt
                 if !state.prompt.isEmpty {
                     Text(state.prompt)
-                        .font(.system(size: 14, design: .monospaced))
+                        .font(overlayFont(size: 14))
                         .foregroundStyle(.secondary)
                         .padding(.trailing, 4)
                 }
@@ -452,12 +493,12 @@ struct CmdlineOverlayView: View {
 
         HStack(spacing: 0) {
             Text(beforeCursor)
-                .font(.system(size: 14, design: .monospaced))
+                .font(overlayFont(size: 14))
                 .foregroundStyle(color(rgb: defaultFG))
 
             // Cursor
             Text(cursorChar)
-                .font(.system(size: 14, design: .monospaced))
+                .font(overlayFont(size: 14))
                 .foregroundStyle(cursorVisible ? color(rgb: defaultBG) : color(rgb: defaultFG))
                 .background(cursorVisible ? color(rgb: defaultFG) : Color.clear)
 
@@ -466,7 +507,7 @@ struct CmdlineOverlayView: View {
                     ? String(afterCursor.dropFirst())
                     : afterCursor
                 Text(remaining)
-                    .font(.system(size: 14, design: .monospaced))
+                    .font(overlayFont(size: 14))
                     .foregroundStyle(color(rgb: defaultFG))
             }
         }
@@ -539,7 +580,7 @@ struct MessageOverlayView: View {
             }
 
             Text(msg.content.map(\.text).joined())
-                .font(.system(size: 13, design: .monospaced))
+                .font(overlayFont(size: 13))
                 .foregroundStyle(color(rgb: defaultFG))
                 .lineLimit(6)
                 .multilineTextAlignment(.leading)

@@ -154,8 +154,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
     /// - Parameter font: A monospace font. If a proportional font is provided,
     ///   character alignment will be approximate.
     public init(font: PlatformFont) {
-        self.font = font
-        self.ctFont = font as CTFont
+        let cascadedFont = GlyphFallbackFonts.cascadedPlatformFont(base: font)
+
+        self.font = cascadedFont
+        self.ctFont = cascadedFont as CTFont
 
         let size = font.pointSize
 
@@ -164,21 +166,33 @@ public final class CoreTextRenderer: @unchecked Sendable {
         let boldDescriptor = font.fontDescriptor.withSymbolicTraits(.bold)
         let italicDescriptor = font.fontDescriptor.withSymbolicTraits(.italic)
         let boldItalicDescriptor = font.fontDescriptor.withSymbolicTraits([.bold, .italic])
-        self.ctFontBold = CTFontCreateWithFontDescriptor(boldDescriptor as CTFontDescriptor, size, nil)
-        self.ctFontItalic = CTFontCreateWithFontDescriptor(italicDescriptor as CTFontDescriptor, size, nil)
-        self.ctFontBoldItalic = CTFontCreateWithFontDescriptor(boldItalicDescriptor as CTFontDescriptor, size, nil)
+        self.ctFontBold = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(boldDescriptor as CTFontDescriptor, size, nil)
+        )
+        self.ctFontItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(italicDescriptor as CTFontDescriptor, size, nil)
+        )
+        self.ctFontBoldItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(boldItalicDescriptor as CTFontDescriptor, size, nil)
+        )
         #else
         let boldDescriptor = font.fontDescriptor.withSymbolicTraits(.traitBold)
         let italicDescriptor = font.fontDescriptor.withSymbolicTraits(.traitItalic)
         let boldItalicDescriptor = font.fontDescriptor.withSymbolicTraits([.traitBold, .traitItalic])
-        self.ctFontBold = CTFontCreateWithFontDescriptor(
-            (boldDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontBold = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (boldDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
-        self.ctFontItalic = CTFontCreateWithFontDescriptor(
-            (italicDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (italicDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
-        self.ctFontBoldItalic = CTFontCreateWithFontDescriptor(
-            (boldItalicDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontBoldItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (boldItalicDescriptor ?? font.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
         #endif
 
@@ -195,8 +209,10 @@ public final class CoreTextRenderer: @unchecked Sendable {
 
     /// Change the rendering font and recalculate all metrics.
     public func setFont(_ newFont: PlatformFont) {
-        self.font = newFont
-        self.ctFont = newFont as CTFont
+        let cascadedFont = GlyphFallbackFonts.cascadedPlatformFont(base: newFont)
+
+        self.font = cascadedFont
+        self.ctFont = cascadedFont as CTFont
 
         let size = newFont.pointSize
 
@@ -204,21 +220,33 @@ public final class CoreTextRenderer: @unchecked Sendable {
         let boldDesc = newFont.fontDescriptor.withSymbolicTraits(.bold)
         let italicDesc = newFont.fontDescriptor.withSymbolicTraits(.italic)
         let biDesc = newFont.fontDescriptor.withSymbolicTraits([.bold, .italic])
-        self.ctFontBold = CTFontCreateWithFontDescriptor(boldDesc as CTFontDescriptor, size, nil)
-        self.ctFontItalic = CTFontCreateWithFontDescriptor(italicDesc as CTFontDescriptor, size, nil)
-        self.ctFontBoldItalic = CTFontCreateWithFontDescriptor(biDesc as CTFontDescriptor, size, nil)
+        self.ctFontBold = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(boldDesc as CTFontDescriptor, size, nil)
+        )
+        self.ctFontItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(italicDesc as CTFontDescriptor, size, nil)
+        )
+        self.ctFontBoldItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(biDesc as CTFontDescriptor, size, nil)
+        )
         #else
         let boldDesc = newFont.fontDescriptor.withSymbolicTraits(.traitBold)
         let italicDesc = newFont.fontDescriptor.withSymbolicTraits(.traitItalic)
         let biDesc = newFont.fontDescriptor.withSymbolicTraits([.traitBold, .traitItalic])
-        self.ctFontBold = CTFontCreateWithFontDescriptor(
-            (boldDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontBold = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (boldDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
-        self.ctFontItalic = CTFontCreateWithFontDescriptor(
-            (italicDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (italicDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
-        self.ctFontBoldItalic = CTFontCreateWithFontDescriptor(
-            (biDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+        self.ctFontBoldItalic = GlyphFallbackFonts.cascadedCTFont(
+            base: CTFontCreateWithFontDescriptor(
+                (biDesc ?? newFont.fontDescriptor) as CTFontDescriptor, size, nil
+            )
         )
         #endif
 

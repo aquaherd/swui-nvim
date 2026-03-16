@@ -7,6 +7,26 @@ import AppKit
 
 @main
 struct SWUINeovimMacApp: App {
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "swuineovim.nvimPath": Self.resolvedNvimPath()
+        ])
+    }
+
+    /// Returns the first nvim binary found in the well-known install locations
+    /// for Homebrew (Apple Silicon and Intel) and MacPorts, falling back to the
+    /// Homebrew Apple Silicon path if none is found.
+    nonisolated static func resolvedNvimPath() -> String {
+        let candidates = [
+            "/opt/homebrew/bin/nvim",   // Homebrew – Apple Silicon
+            "/usr/local/bin/nvim",      // Homebrew – Intel
+            "/opt/local/bin/nvim",      // MacPorts
+        ]
+        return candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        } ?? candidates[0]
+    }
+
     var body: some Scene {
         WindowGroup("SWUINeovimMac", id: "local-session") {
             SWUINeovimMacRootView()
@@ -97,9 +117,10 @@ private struct SWUINeovimMacRootView: View {
     @State private var didInitializeSession: Bool = false
     @State private var showSSHConnect: Bool = false
     @State private var window: NSWindow?
-    @AppStorage("swuineovim.nvimPath") private var nvimPath: String = "/opt/local/bin/nvim"
+    @AppStorage("swuineovim.nvimPath") private var nvimPath: String = SWUINeovimMacApp.resolvedNvimPath()
     @AppStorage("swuineovim.editorFontName") private var editorFontName: String = "Menlo-Regular"
     @AppStorage("swuineovim.editorFontSize") private var editorFontSize: Double = 14
+    @AppStorage("swuineovim.metalEnabled") private var metalEnabled: Bool = true
 
     init(initialLaunch: SSHWindowLaunch? = nil) {
         self.initialLaunch = initialLaunch
@@ -117,9 +138,11 @@ private struct SWUINeovimMacRootView: View {
                 controller: controller,
                 snapshot: gridSnapshot,
                 fontName: editorFontName,
-                fontSize: editorFontSize
+                fontSize: editorFontSize,
+                metalEnabled: metalEnabled
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .zIndex(0)
 
             if !gridSnapshot.layers.isEmpty {
                 MultigridOverlayView(
@@ -128,6 +151,7 @@ private struct SWUINeovimMacRootView: View {
                     fontName: editorFontName,
                     fontSize: editorFontSize
                 )
+                .zIndex(1)
             }
 
             // Layer 2: Popup menu overlay
@@ -155,6 +179,7 @@ private struct SWUINeovimMacRootView: View {
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .topLeading)))
                 .animation(.easeOut(duration: 0.12), value: controller.session.popupMenu.isVisible)
+                .zIndex(2)
             }
 
             // Layer 3: Messages + command line anchored at bottom
@@ -179,6 +204,7 @@ private struct SWUINeovimMacRootView: View {
                     .animation(.easeInOut(duration: 0.15), value: controller.session.cmdline.isVisible)
                 }
             }
+            .zIndex(3)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
