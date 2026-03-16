@@ -301,7 +301,7 @@ public final class MetalGlyphAtlas {
             advance.width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         }
 
-        cellWidth = max(1, ceil(advance.width))
+        cellWidth = max(1, advance.width)
         cellHeight = max(1, ceil(CTFontGetAscent(font) + CTFontGetDescent(font)))
     }
 
@@ -365,9 +365,10 @@ public final class MetalGlyphAtlas {
             return nil
         }
 
-        // Flip coordinates (CoreGraphics has origin at bottom-left)
-        context.translateBy(x: 0, y: CGFloat(glyphHeight))
-        context.scaleBy(x: 1.0, y: -1.0)
+        // CoreGraphics has origin at bottom-left; Metal textures read top-down.
+        // Drawing in the natural CG coordinate system produces a correctly
+        // oriented glyph in the Metal texture (ascenders at the top of the
+        // buffer — first in memory — which Metal reads as y=0).
 
         // Set up for text drawing
         context.setAllowsAntialiasing(true)
@@ -378,7 +379,7 @@ public final class MetalGlyphAtlas {
         let renderFont = GlyphFallbackFonts.cascadedCTFont(base: font)
 
         // Draw the glyph in white (the shader will apply the actual foreground color).
-        let ascent = CTFontGetAscent(renderFont)
+        let descent = CTFontGetDescent(renderFont)
         let attributedString = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
         CFAttributedStringReplaceString(attributedString, CFRangeMake(0, 0), key.characters as CFString)
         let fullRange = CFRangeMake(0, CFAttributedStringGetLength(attributedString))
@@ -389,7 +390,9 @@ public final class MetalGlyphAtlas {
 
         let line = CTLineCreateWithAttributedString(attributedString)
 
-        context.textPosition = CGPoint(x: 0, y: ascent)
+        // Place baseline at y=descent so descenders reach y=0 (bottom of CG image)
+        // and ascenders reach y=height (top of CG image → top of Metal texture).
+        context.textPosition = CGPoint(x: 0, y: descent)
         CTLineDraw(line, context)
 
         // Upload to the atlas texture
@@ -411,7 +414,7 @@ public final class MetalGlyphAtlas {
             width: UInt16(glyphWidth),
             height: UInt16(glyphHeight),
             bearingX: 0,
-            bearingY: Float(ascent),
+            bearingY: Float(CTFontGetAscent(renderFont)),
             advance: Float(cellWidth)
         )
 

@@ -291,7 +291,7 @@ final class EditorGridNSView: NSView {
 
             // Draw cursor via CoreText on top of the Metal layer.
             if let cg = NSGraphicsContext.current?.cgContext {
-                drawCursor(in: cg, cellSize: cellSize)
+                drawMultigridCursor(in: cg, cellSize: cellSize)
             }
         } else {
             // Hide metal layer when using CoreText
@@ -312,26 +312,66 @@ final class EditorGridNSView: NSView {
         cg.setFillColor(bg.cgColor)
         cg.fill(bounds)
 
+        // Draw base grid (grid 1)
+        drawGridCoreText(
+            cells: snapshot.cells,
+            rows: snapshot.rows,
+            cols: snapshot.cols,
+            origin: .zero,
+            cellSize: cellSize,
+            in: cg
+        )
+
+        // Draw non-floating multigrid layers on top (editor panes, statusline, etc.)
+        for layer in snapshot.layers where !layer.isFloating && layer.id != 1 {
+            let origin = CGPoint(
+                x: CGFloat(layer.originCol) * cellSize.width,
+                y: CGFloat(layer.originRow) * cellSize.height
+            )
+            drawGridCoreText(
+                cells: layer.cells,
+                rows: layer.rows,
+                cols: layer.cols,
+                origin: origin,
+                cellSize: cellSize,
+                in: cg
+            )
+        }
+
+        drawMultigridCursor(in: cg, cellSize: cellSize)
+
+        coreTextBenchmark.record(CACurrentMediaTime() - startTime)
+    }
+
+    /// Draws a grid of cells at the given pixel origin using CoreText.
+    private func drawGridCoreText(
+        cells: [[GridCell]],
+        rows: Int,
+        cols: Int,
+        origin: CGPoint,
+        cellSize: CGSize,
+        in cg: CGContext
+    ) {
         let textYOffset = max(0, floor((cellSize.height - font.boundingRectForFont.height) / 2.0))
 
         // 1) Draw cell backgrounds by highlight runs.
-        for row in 0..<snapshot.rows {
+        for row in 0..<rows {
             var col = 0
-            while col < snapshot.cols {
-                let cell = snapshot.cells[row][col]
+            while col < cols {
+                let cell = cells[row][col]
                 let runBackground = backgroundColor(for: cell.highlightID)
                 let start = col
                 col += 1
 
-                while col < snapshot.cols {
-                    let next = snapshot.cells[row][col]
+                while col < cols {
+                    let next = cells[row][col]
                     if backgroundColor(for: next.highlightID) != runBackground { break }
                     col += 1
                 }
 
                 let rect = CGRect(
-                    x: CGFloat(start) * cellSize.width,
-                    y: CGFloat(row) * cellSize.height,
+                    x: origin.x + CGFloat(start) * cellSize.width,
+                    y: origin.y + CGFloat(row) * cellSize.height,
                     width: CGFloat(col - start) * cellSize.width,
                     height: cellSize.height
                 )
@@ -341,9 +381,9 @@ final class EditorGridNSView: NSView {
         }
 
         // 2) Draw text per cell.
-        for row in 0..<snapshot.rows {
-            for col in 0..<snapshot.cols {
-                let cell = snapshot.cells[row][col]
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let cell = cells[row][col]
                 guard !cell.text.isEmpty, cell.text != " " else { continue }
                 if BoxDrawing.info(for: cell.text) != nil { continue }
                 let fg = foregroundColor(for: cell.highlightID)
@@ -359,8 +399,8 @@ final class EditorGridNSView: NSView {
                 }
 
                 let cellRect = CGRect(
-                    x: CGFloat(col) * cellSize.width,
-                    y: CGFloat(row) * cellSize.height,
+                    x: origin.x + CGFloat(col) * cellSize.width,
+                    y: origin.y + CGFloat(row) * cellSize.height,
                     width: cellSize.width,
                     height: cellSize.height
                 )
@@ -383,11 +423,7 @@ final class EditorGridNSView: NSView {
         }
 
         // 3) Owner-draw box-drawing characters.
-        drawBoxDrawingCharacters(in: cg, cellSize: cellSize)
-
-        drawCursor(in: cg, cellSize: cellSize)
-
-        coreTextBenchmark.record(CACurrentMediaTime() - startTime)
+        drawBoxDrawingCharactersInGrid(cells: cells, rows: rows, cols: cols, origin: origin, cellSize: cellSize, in: cg)
     }
 
     // MARK: - Metal Draw Path
@@ -434,7 +470,7 @@ final class EditorGridNSView: NSView {
 
         atlas.draw(
             instances: instances,
-            viewportSize: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height)),
+            viewportSize: SIMD2<Float>(Float(bounds.width), Float(bounds.height)),
             renderEncoder: encoder
         )
 
@@ -447,58 +483,83 @@ final class EditorGridNSView: NSView {
 
     private func buildMetalInstances(atlas: MetalGlyphAtlas, cellSize: CGSize) -> [CellInstance] {
         var flatCells: [(glyph: GlyphKey, fg: (Float, Float, Float, Float), bg: (Float, Float, Float, Float))] = []
-        flatCells.reserveCapacity(snapshot.rows * snapshot.cols)
 
-        for row in 0..<snapshot.rows {
-            for col in 0..<snapshot.cols {
-                let cell = snapshot.cells[row][col]
-                let hlAttrs = snapshot.highlights[cell.highlightID]
+        // Helper to append cells for a grid at a col/row origin offset
+        func appendGrid(cells: [[GridCell]], rows: Int, cols: Int, originCol: Double, originRow: Double) {
+            for row in 0..<rows {
+                for col in 0..<cols {
+                    let cell = cells[row][col]
+                    let hlAttrs = snapshot.highlights[cell.highlightID]
 
-                // Resolve colors with reverse support
-                let fgRGB: UInt32
-                let bgRGB: UInt32
-                if hlAttrs?.reverse == true {
-                    fgRGB = hlAttrs?.background ?? snapshot.defaultBackground
-                    bgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
-                } else {
-                    fgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
-                    bgRGB = hlAttrs?.background ?? snapshot.defaultBackground
-                }
-
-                let fg = rgbToFloats(fgRGB)
-                let bg = rgbToFloats(bgRGB, alpha: blendAlpha(for: hlAttrs))
-
-                let text = cell.text
-                let glyphKey: GlyphKey
-                if text.isEmpty || text == " " || cell.isDoubleWidthContinuation {
-                    // Blank cell — no glyph
-                    glyphKey = GlyphKey(characters: "", bold: false, italic: false, fontSize: font.pointSize)
-                } else {
-                    let bold = hlAttrs?.bold ?? false
-                    let italic = hlAttrs?.italic ?? false
-                    glyphKey = GlyphKey(characters: text, bold: bold, italic: italic, fontSize: font.pointSize)
-
-                    // Use the cascaded render font matching the cell's style so that
-                    // Nerd Font / icon glyphs fall through to the installed fallback font.
-                    let ctFont: CTFont
-                    switch (bold, italic) {
-                    case (true, true):  ctFont = renderFontBoldItalic as CTFont
-                    case (true, false): ctFont = renderFontBold as CTFont
-                    case (false, true): ctFont = renderFontItalic as CTFont
-                    default:            ctFont = renderFont as CTFont
+                    let fgRGB: UInt32
+                    let bgRGB: UInt32
+                    if hlAttrs?.reverse == true {
+                        fgRGB = hlAttrs?.background ?? snapshot.defaultBackground
+                        bgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                    } else {
+                        fgRGB = hlAttrs?.foreground ?? snapshot.defaultForeground
+                        bgRGB = hlAttrs?.background ?? snapshot.defaultBackground
                     }
-                    atlas.rasterise(glyphKey, font: ctFont)
-                }
 
-                flatCells.append((glyph: glyphKey, fg: fg, bg: bg))
+                    let fg = rgbToFloats(fgRGB)
+                    let bg = rgbToFloats(bgRGB, alpha: blendAlpha(for: hlAttrs))
+
+                    let text = cell.text
+                    let glyphKey: GlyphKey
+                    if text.isEmpty || text == " " || cell.isDoubleWidthContinuation {
+                        glyphKey = GlyphKey(characters: "", bold: false, italic: false, fontSize: font.pointSize)
+                    } else {
+                        let bold = hlAttrs?.bold ?? false
+                        let italic = hlAttrs?.italic ?? false
+                        glyphKey = GlyphKey(characters: text, bold: bold, italic: italic, fontSize: font.pointSize)
+
+                        let ctFont: CTFont
+                        switch (bold, italic) {
+                        case (true, true):  ctFont = renderFontBoldItalic as CTFont
+                        case (true, false): ctFont = renderFontBold as CTFont
+                        case (false, true): ctFont = renderFontItalic as CTFont
+                        default:            ctFont = renderFont as CTFont
+                        }
+                        atlas.rasterise(glyphKey, font: ctFont)
+                    }
+
+                    flatCells.append((glyph: glyphKey, fg: fg, bg: bg))
+                }
             }
         }
 
-        return atlas.buildInstanceBuffer(
+        // Base grid (grid 1) at origin (0,0)
+        appendGrid(cells: snapshot.cells, rows: snapshot.rows, cols: snapshot.cols, originCol: 0, originRow: 0)
+
+        // Build base grid instances
+        var instances = atlas.buildInstanceBuffer(
             cells: flatCells,
             columns: snapshot.cols,
             rows: snapshot.rows
         )
+
+        // Non-floating multigrid layers drawn on top at their grid origins
+        for layer in snapshot.layers where !layer.isFloating && layer.id != 1 {
+            flatCells.removeAll(keepingCapacity: true)
+            appendGrid(cells: layer.cells, rows: layer.rows, cols: layer.cols, originCol: layer.originCol, originRow: layer.originRow)
+
+            let layerInstances = atlas.buildInstanceBuffer(
+                cells: flatCells,
+                columns: layer.cols,
+                rows: layer.rows
+            )
+
+            // Offset gridX/gridY to the layer's origin position
+            let colOffset = UInt16(max(0, Int(layer.originCol)))
+            let rowOffset = UInt16(max(0, Int(layer.originRow)))
+            for var inst in layerInstances {
+                inst.gridX += colOffset
+                inst.gridY += rowOffset
+                instances.append(inst)
+            }
+        }
+
+        return instances
     }
 
     private func rgbToFloats(_ rgb: UInt32, alpha: Float = 1.0) -> (Float, Float, Float, Float) {
@@ -585,17 +646,31 @@ final class EditorGridNSView: NSView {
         addCursorRect(bounds, cursor: cursor)
     }
 
-    private func drawCursor(in cg: CGContext, cellSize: CGSize) {
-        guard snapshot.drawBaseCursor else { return }
+    private func drawMultigridCursor(in cg: CGContext, cellSize: CGSize) {
         if shouldBlinkCursor && !cursorBlinkVisible {
             return
         }
 
-        let row = max(0, min(snapshot.rows - 1, snapshot.cursorRow))
-        let col = max(0, min(snapshot.cols - 1, snapshot.cursorCol))
+        // Find the layer the cursor is on (non-floating layers rendered in the NSView).
+        // If on a floating layer or if cursor grid matches no non-floating layer,
+        // the SwiftUI overlay handles it.
+        let cursorOrigin: CGPoint
+        if snapshot.drawBaseCursor {
+            // No multigrid layers — cursor is on grid 1
+            cursorOrigin = .zero
+        } else if let layer = snapshot.layers.first(where: { $0.id == snapshot.cursorGridID && !$0.isFloating }) {
+            cursorOrigin = CGPoint(
+                x: CGFloat(layer.originCol) * cellSize.width,
+                y: CGFloat(layer.originRow) * cellSize.height
+            )
+        } else {
+            // Cursor is on a floating layer — SwiftUI overlay draws it
+            return
+        }
+
         let rect = CGRect(
-            x: CGFloat(col) * cellSize.width,
-            y: CGFloat(row) * cellSize.height,
+            x: cursorOrigin.x + CGFloat(snapshot.cursorCol) * cellSize.width,
+            y: cursorOrigin.y + CGFloat(snapshot.cursorRow) * cellSize.height,
             width: cellSize.width,
             height: cellSize.height
         )
@@ -894,19 +969,26 @@ final class EditorGridNSView: NSView {
 
     // MARK: - Box-Drawing / Line-Drawing Owner Draw
 
-    private func drawBoxDrawingCharacters(in cg: CGContext, cellSize: CGSize) {
+    private func drawBoxDrawingCharactersInGrid(
+        cells: [[GridCell]],
+        rows: Int,
+        cols: Int,
+        origin: CGPoint,
+        cellSize: CGSize,
+        in cg: CGContext
+    ) {
         let lineWidth: CGFloat = 1.0
         let heavyLineWidth: CGFloat = 2.0
 
-        for row in 0..<snapshot.rows {
-            for col in 0..<snapshot.cols {
-                let cell = snapshot.cells[row][col]
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let cell = cells[row][col]
                 guard let info = BoxDrawing.info(for: cell.text) else { continue }
 
                 let fg = foregroundColor(for: cell.highlightID)
                 let cellRect = CGRect(
-                    x: CGFloat(col) * cellSize.width,
-                    y: CGFloat(row) * cellSize.height,
+                    x: origin.x + CGFloat(col) * cellSize.width,
+                    y: origin.y + CGFloat(row) * cellSize.height,
                     width: cellSize.width,
                     height: cellSize.height
                 )

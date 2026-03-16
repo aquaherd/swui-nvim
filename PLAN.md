@@ -59,8 +59,8 @@
 | Layer | Responsibility |
 |-------|---------------|
 | **SwiftUI Shell** | App lifecycle, scenes, windows, menus, settings, navigation. Pure SwiftUI. |
-| **EditorSurface** | Platform-specific view (`NSViewRepresentable` / `UIViewRepresentable`) hosting the rendering layer. Handles input events (key, mouse/touch, scroll, IME). |
-| **Overlay Layer** | SwiftUI views (`.overlay`) for popupmenu, floating windows, command-line, messages. Positioned via grid coordinates translated to screen points. |
+| **EditorSurface** | Platform-specific view (`NSViewRepresentable` / `UIViewRepresentable`) hosting the rendering layer. Renders grid 1 and all non-floating multigrid layers (editor panes, statusline, tabline) via CoreText or Metal. Handles input events (key, mouse/touch, scroll, IME). |
+| **Overlay Layer** | SwiftUI views (`.overlay`) for floating windows (Telescope, hover, diagnostics), popupmenu, command-line, messages. Positioned via grid coordinates translated to screen points. Future Option D: floating window overlays become decoration-only (chrome, shadows), with cell content rendered by EditorSurface. |
 | **NvimSession** | Swift actor managing one Neovim process/connection. Owns the MsgPack-RPC channel, UI event state machine, and redraw queue. |
 | **Transport** | Protocol-abstracted byte stream — local `Process` stdio or SSH channel. |
 
@@ -317,6 +317,15 @@ Display
 - [x] **Box-drawing in atlas**: In `MetalGlyphAtlas.rasterise()`, detect box-drawing characters via `BoxDrawingLookup.info(for:)` and draw them into the atlas bitmap using CGContext path logic (shared with `CoreTextRenderer`) instead of `CTLineDraw`. Extracted `BoxDrawingRenderer` helper that accepts any `CGContext`.
 - [x] Benchmarks: `RenderBenchmark` struct tracks avg/p95 frame times for both CoreText and Metal paths. `EditorGridNSView.renderStats` exposes active renderer stats.
 - [x] Automatic fallback on unsupported hardware. Metal used when grid exceeds `cellCountThreshold` (12K cells); CoreText otherwise. Falls back gracefully when Metal device unavailable.
+
+### Phase 5b — Multigrid in NSView (B → D roadmap)
+
+**Current: Option B** — Non-floating grids rendered in NSView (Metal/CoreText), floating grids rendered in SwiftUI overlays.
+
+- [x] Non-floating multigrid layers (editor panes, statusline, tabline) rendered by `EditorGridNSView` in both CoreText and Metal paths, composited at their grid origin positions.
+- [x] `MultigridOverlayView` reduced to floating layers only (Telescope, hover, diagnostic floats). SwiftUI provides native chrome (rounded corners, shadows, blur).
+- [x] Cursor drawn by NSView when on a non-floating layer; SwiftUI overlay draws cursor on floating layers.
+- [ ] **→ Option D (future)**: Move floating grid *cell rendering* into NSView Metal/CoreText path too. SwiftUI overlays become decoration-only (empty `RoundedRectangle` + shadow + blur at floating window bounds, no `Text` views). All text goes through one GPU render path. Enables smooth scroll, cursor animation, and grid transitions as Metal uniform updates.
 
 ### Phase 6 — Polish & App Store (Week 15–17)
 

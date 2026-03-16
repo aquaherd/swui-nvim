@@ -243,7 +243,7 @@ struct MultigridOverlayView: View {
         GeometryReader { _ in
             ZStack(alignment: .topLeading) {
                 ForEach(snapshot.layers) { layer in
-                    if layer.id != 1 {
+                    if layer.id != 1 && layer.isFloating {
                         MultigridLayerView(
                             layer: layer,
                             defaultFG: snapshot.defaultForeground,
@@ -276,7 +276,8 @@ struct MultigridOverlayView: View {
     }
 
     private var cursorLayer: MacSessionController.GridSnapshot.Layer? {
-        snapshot.layers.first(where: { $0.id == snapshot.cursorGridID })
+        // Only draw cursor in overlay if it's on a floating layer
+        snapshot.layers.first(where: { $0.id == snapshot.cursorGridID && $0.isFloating })
     }
 
     @ViewBuilder
@@ -337,6 +338,7 @@ private struct MultigridLayerView: View {
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         } else {
             content
+                .background(color(rgb: defaultBG))
         }
     }
 }
@@ -361,8 +363,8 @@ private struct MultigridRowView: View {
                         italic: run.italic
                     ))
                     .foregroundStyle(run.foreground)
-                    .background(run.background)
                     .frame(width: CGFloat(run.cellCount) * cellSize.width, height: cellSize.height, alignment: .leading)
+                    .background(run.background)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
