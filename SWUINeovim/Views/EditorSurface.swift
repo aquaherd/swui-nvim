@@ -244,12 +244,16 @@ public class EditorSurfaceView: NSView, NSTextInputClient {
         context.fill(bounds)
 
         // Draw each grid
-        for (_, grid) in session.grids {
+        for (gridID, grid) in session.grids where !isFloatingGrid(gridID) {
             drawGrid(grid, in: context, viewHeight: viewHeight)
         }
 
         // Draw cursor
         drawCursor(in: context, viewHeight: viewHeight)
+    }
+
+    private func isFloatingGrid(_ gridID: Int) -> Bool {
+        session.windowPositions[gridID]?.isFloating == true
     }
 
     private func drawGrid(_ grid: Grid, in context: CGContext, viewHeight: CGFloat) {
@@ -938,12 +942,16 @@ public class EditorSurfaceView: UIView, UIKeyInput, UITextInput {
         context.fill(bounds)
 
         // Draw grids
-        for (_, grid) in session.grids {
+        for (gridID, grid) in session.grids where !isFloatingGrid(gridID) {
             drawGrid(grid, in: context)
         }
 
         // Draw cursor
         drawCursor(in: context)
+    }
+
+    private func isFloatingGrid(_ gridID: Int) -> Bool {
+        session.windowPositions[gridID]?.isFloating == true
     }
 
     private func drawGrid(_ grid: Grid, in context: CGContext) {

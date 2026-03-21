@@ -246,6 +246,8 @@ struct MultigridOverlayView: View {
                     if layer.id != 1 && layer.isFloating {
                         MultigridLayerView(
                             layer: layer,
+                            editorRows: snapshot.rows,
+                            editorCols: snapshot.cols,
                             defaultFG: snapshot.defaultForeground,
                             defaultBG: snapshot.defaultBackground,
                             highlightTable: snapshot.highlights,
@@ -305,6 +307,8 @@ struct MultigridOverlayView: View {
 
 private struct MultigridLayerView: View {
     let layer: MacSessionController.GridSnapshot.Layer
+    let editorRows: Int
+    let editorCols: Int
     let defaultFG: UInt32
     let defaultBG: UInt32
     let highlightTable: [Int: RawHighlightAttrs]
@@ -313,33 +317,98 @@ private struct MultigridLayerView: View {
     let cellSize: CGSize
 
     var body: some View {
-        let content = VStack(alignment: .leading, spacing: 0) {
-            ForEach(0..<layer.rows, id: \.self) { row in
-                MultigridRowView(
-                    cells: layer.cells[row],
-                    defaultFG: defaultFG,
-                    defaultBG: defaultBG,
-                    highlightTable: highlightTable,
-                    fontName: fontName,
-                    fontSize: fontSize,
-                    cellSize: cellSize
-                )
-            }
-        }
+        if isBackdropWindow {
+            ZStack {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.75)
 
-        if layer.isFloating {
+                Rectangle()
+                    .fill(backdropTint)
+            }
+        } else if layer.isFloating {
+            let content = VStack(alignment: .leading, spacing: 0) {
+                ForEach(0..<layer.rows, id: \.self) { row in
+                    MultigridRowView(
+                        cells: layer.cells[row],
+                        defaultFG: defaultFG,
+                        defaultBG: defaultBG,
+                        highlightTable: highlightTable,
+                        fontName: fontName,
+                        fontSize: fontSize,
+                        cellSize: cellSize
+                    )
+                }
+            }
+
             content
-                .background(color(rgb: defaultBG))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5)
                 }
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         } else {
+            let content = VStack(alignment: .leading, spacing: 0) {
+                ForEach(0..<layer.rows, id: \.self) { row in
+                    MultigridRowView(
+                        cells: layer.cells[row],
+                        defaultFG: defaultFG,
+                        defaultBG: defaultBG,
+                        highlightTable: highlightTable,
+                        fontName: fontName,
+                        fontSize: fontSize,
+                        cellSize: cellSize
+                    )
+                }
+            }
+
             content
-                .background(color(rgb: defaultBG))
         }
+    }
+
+    private var isBackdropWindow: Bool {
+        layer.isFloating
+            && !layer.mouseEnabled
+            && layer.originRow == 0
+            && layer.originCol == 0
+            && Double(layer.cols) >= Double(editorCols) * 0.6
+            && Double(layer.rows) >= Double(editorRows) * 0.6
+    }
+
+    private var backdropColor: Color {
+        let alpha = dominantBlend > 0 ? Double(100 - dominantBlend) / 100.0 : 0.35
+        return color(rgb: dominantBackground, opacity: alpha)
+    }
+
+    private var backdropTint: Color {
+        let alpha = dominantBlend > 0 ? Double(100 - dominantBlend) / 200.0 : 0.18
+        return color(rgb: dominantBackground, opacity: alpha)
+    }
+
+    private var dominantBackground: UInt32 {
+        var counts: [UInt32: Int] = [:]
+        var winner = defaultBG
+        for row in layer.cells {
+            for cell in row {
+                let bg = highlightTable[cell.highlightID]?.background ?? defaultBG
+                counts[bg, default: 0] += 1
+                if counts[bg, default: 0] > counts[winner, default: 0] {
+                    winner = bg
+                }
+            }
+        }
+        return winner
+    }
+
+    private var dominantBlend: Int {
+        var winner = 0
+        for row in layer.cells {
+            for cell in row {
+                winner = max(winner, min(max(highlightTable[cell.highlightID]?.blend ?? 0, 0), 100))
+            }
+        }
+        return winner
     }
 }
 

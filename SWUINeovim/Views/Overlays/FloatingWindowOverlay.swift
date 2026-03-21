@@ -2,52 +2,33 @@
 // SWUINeovim
 //
 // SwiftUI overlay that renders Neovim floating windows (win_float_pos)
-// as positioned cards above the editor surface. Used for LSP hover info,
-// diagnostic floats, and any other floating windows from plugins.
+// above the main editor surface.
 
+import Foundation
 import SwiftUI
 
 // MARK: - FloatingWindowOverlay
 
-/// Renders all visible floating windows as overlaid cards positioned
-/// relative to their anchor grid coordinates.
-///
-/// Each floating window is a separate Neovim grid that has been positioned
-/// via `win_float_pos`. This view renders the grid content using styled
-/// text and positions it at the anchor point in the editor surface.
 struct FloatingWindowOverlay: View {
-    /// All grids, keyed by grid ID.
     let grids: [Int: Grid]
-
-    /// Window position metadata (includes floating window anchor info).
     let windowPositions: [Int: WindowPosition]
-
-    /// Highlight table for resolving highlight IDs to colors.
     let highlightTable: [Int: RawHighlightAttrs]
-
-    /// Default foreground/background colors.
     let defaultColors: DefaultColors
-
-    /// Size of a single grid cell in points.
     let cellSize: CGSize
 
     var body: some View {
         ForEach(floatingWindows, id: \.gridID) { floatInfo in
             FloatingWindowCard(
+                grids: grids,
                 grid: floatInfo.grid,
                 position: floatInfo.position,
                 highlightTable: highlightTable,
                 defaultColors: defaultColors,
                 cellSize: cellSize
             )
-            .offset(
-                x: floatInfo.pixelX,
-                y: floatInfo.pixelY
-            )
+            .offset(x: floatInfo.pixelX, y: floatInfo.pixelY)
         }
     }
-
-    // MARK: - Floating Window Info
 
     private struct FloatingWindowInfo: Identifiable {
         let gridID: Int
@@ -59,35 +40,32 @@ struct FloatingWindowOverlay: View {
         var id: Int { gridID }
     }
 
-    /// Collect and sort floating windows by z-index.
     private var floatingWindows: [FloatingWindowInfo] {
         windowPositions
             .filter { $0.value.isFloating }
             .compactMap { gridID, position -> FloatingWindowInfo? in
                 guard let grid = grids[gridID] else { return nil }
 
-                // Calculate pixel position from anchor coordinates,
-                // adjusting for the anchor corner (NW/NE/SW/SE).
                 let anchorRow = position.anchorRow ?? 0
                 let anchorCol = position.anchorCol ?? 0
                 let floatWidth = CGFloat(grid.cols) * cellSize.width
                 let floatHeight = CGFloat(grid.rows) * cellSize.height
 
-                var pixelX = CGFloat(anchorCol) * cellSize.width
-                var pixelY = CGFloat(anchorRow) * cellSize.height
+                var pixelX = CGFloat(position.screenCol ?? Int(anchorCol.rounded(.down))) * cellSize.width
+                var pixelY = CGFloat(position.screenRow ?? Int(anchorRow.rounded(.down))) * cellSize.height
 
-                // The anchor specifies which corner of the float is placed
-                // at the anchor position. NW = top-left (default), NE = top-right, etc.
-                switch position.anchor {
-                case .northWest:
-                    break // top-left corner at anchor — no adjustment
-                case .northEast:
-                    pixelX -= floatWidth
-                case .southWest:
-                    pixelY -= floatHeight
-                case .southEast:
-                    pixelX -= floatWidth
-                    pixelY -= floatHeight
+                if position.screenRow == nil || position.screenCol == nil {
+                    switch position.anchor {
+                    case .northWest:
+                        break
+                    case .northEast:
+                        pixelX -= floatWidth
+                    case .southWest:
+                        pixelY -= floatHeight
+                    case .southEast:
+                        pixelX -= floatWidth
+                        pixelY -= floatHeight
+                    }
                 }
 
                 return FloatingWindowInfo(
@@ -104,8 +82,8 @@ struct FloatingWindowOverlay: View {
 
 // MARK: - FloatingWindowCard
 
-/// Renders a single floating window as a styled card.
 private struct FloatingWindowCard: View {
+    let grids: [Int: Grid]
     let grid: Grid
     let position: WindowPosition
     let highlightTable: [Int: RawHighlightAttrs]
@@ -113,32 +91,122 @@ private struct FloatingWindowCard: View {
     let cellSize: CGSize
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(0..<grid.rows, id: \.self) { row in
-                if let rowCells = grid.getRow(row) {
-                    FloatingWindowRow(
-                        cells: rowCells,
-                        highlightTable: highlightTable,
-                        defaultColors: defaultColors
-                    )
+        Group {
+            if isBackdropWindow {
+                Rectangle()
+                    .fill(backdropColor)
+                    .frame(width: pixelWidth, height: pixelHeight)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(0..<grid.rows, id: \.self) { row in
+                        if let rowCells = grid.getRow(row) {
+                            FloatingWindowRow(
+                                cells: rowCells,
+                                highlightTable: highlightTable,
+                                defaultColors: defaultColors
+                            )
+                        }
+                    }
+                }
+                .frame(width: pixelWidth, height: pixelHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(borderColor, lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 3)
+            }
+        }
+    }
+
+    private var pixelWidth: CGFloat {
+        CGFloat(grid.cols) * cellSize.width
+    }
+
+    private var pixelHeight: CGFloat {
+        CGFloat(grid.rows) * cellSize.height
+    }
+
+    private var isBackdropWindow: Bool {
+        let mainGrid = grids[position.anchorGridID ?? 1] ?? grids[1]
+        let coversMostOfEditor: Bool
+        if let mainGrid {
+            coversMostOfEditor = Double(grid.cols) >= Double(mainGrid.cols) * 0.6
+                && Double(grid.rows) >= Double(mainGrid.rows) * 0.6
+        } else {
+            coversMostOfEditor = grid.cols >= 40 && grid.rows >= 12
+        }
+
+        let isRootAnchoredBackdrop = !position.mouseEnabled
+            && position.anchorGridID == 1
+            && (position.anchorRow ?? 0) == 0
+            && (position.anchorCol ?? 0) == 0
+            && coversMostOfEditor
+
+        if isRootAnchoredBackdrop {
+            return true
+        }
+
+        var sampledCells = 0
+        var blankCells = 0
+        var hasBackdropSemantic = false
+        var hasBlend = false
+
+        for row in 0..<grid.rows {
+            guard let cells = grid.getRow(row) else { continue }
+            for cell in cells {
+                sampledCells += 1
+                if cell.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    blankCells += 1
+                }
+
+                guard let attrs = highlightTable[cell.highlightID] else { continue }
+                hasBlend = hasBlend || attrs.blend > 0
+                let semanticNames = [attrs.hiName, attrs.uiName].compactMap { $0?.lowercased() }
+                if semanticNames.contains(where: { $0.contains("shadow") || $0.contains("backdrop") }) {
+                    hasBackdropSemantic = true
                 }
             }
         }
-        .frame(
-            width: CGFloat(grid.cols) * cellSize.width,
-            height: CGFloat(grid.rows) * cellSize.height
-        )
-        .background(windowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 3)
+
+        let blankRatio = sampledCells > 0 ? Double(blankCells) / Double(sampledCells) : 0
+        return coversMostOfEditor && (blankRatio > 0.85 || hasBackdropSemantic || hasBlend)
     }
 
-    private var windowBackground: Color {
-        Color(rgb: defaultColors.background)
+    private var backdropColor: Color {
+        let alpha = dominantBackdropBlend > 0
+            ? Double(100 - min(max(dominantBackdropBlend, 0), 100)) / 100.0
+            : 0.35
+        return Color(rgb: dominantBackdropBackground).opacity(alpha)
+    }
+
+    private var dominantBackdropBackground: UInt32 {
+        var counts: [UInt32: Int] = [:]
+        var winner = defaultColors.background
+
+        for row in 0..<grid.rows {
+            guard let cells = grid.getRow(row) else { continue }
+            for cell in cells {
+                guard let bg = highlightTable[cell.highlightID]?.background else { continue }
+                counts[bg, default: 0] += 1
+                if counts[bg, default: 0] > counts[winner, default: 0] {
+                    winner = bg
+                }
+            }
+        }
+
+        return winner
+    }
+
+    private var dominantBackdropBlend: Int {
+        var winner = 0
+        for row in 0..<grid.rows {
+            guard let cells = grid.getRow(row) else { continue }
+            for cell in cells {
+                winner = max(winner, highlightTable[cell.highlightID]?.blend ?? 0)
+            }
+        }
+        return winner
     }
 
     private var borderColor: Color {
@@ -148,7 +216,6 @@ private struct FloatingWindowCard: View {
 
 // MARK: - FloatingWindowRow
 
-/// Renders a single row of a floating window as styled text runs.
 private struct FloatingWindowRow: View {
     let cells: [GridCell]
     let highlightTable: [Int: RawHighlightAttrs]
@@ -165,9 +232,9 @@ private struct FloatingWindowRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.clear)
     }
 
-    /// Group consecutive cells by highlight ID into text runs for efficient rendering.
     private var textRuns: [TextRun] {
         guard !cells.isEmpty else { return [] }
 
@@ -196,17 +263,21 @@ private struct FloatingWindowRow: View {
 
     private func makeRun(text: String, hlID: Int) -> TextRun {
         let attrs = highlightTable[hlID]
-        var fg = Color(rgb: attrs?.foreground ?? defaultColors.foreground)
-        var bg = Color(rgb: attrs?.background ?? defaultColors.background)
+        var foregroundValue = attrs?.foreground ?? defaultColors.foreground
+        var backgroundValue = attrs?.background
 
         if attrs?.reverse == true {
-            swap(&fg, &bg)
+            foregroundValue = attrs?.background ?? defaultColors.background
+            backgroundValue = attrs?.foreground
         }
+
+        let blend = min(max(attrs?.blend ?? 0, 0), 100)
+        let backgroundOpacity = Double(100 - blend) / 100.0
 
         return TextRun(
             text: text,
-            foreground: fg,
-            background: bg,
+            foreground: Color(rgb: foregroundValue),
+            background: backgroundValue.map { Color(rgb: $0).opacity(backgroundOpacity) } ?? Color.clear,
             bold: attrs?.bold ?? false,
             italic: attrs?.italic ?? false
         )
@@ -220,40 +291,3 @@ private struct TextRun {
     let bold: Bool
     let italic: Bool
 }
-
-// MARK: - Preview
-
-#if DEBUG
-#Preview("Floating Window") {
-    ZStack(alignment: .topLeading) {
-        Color.black
-            .ignoresSafeArea()
-
-        // Simulate a floating window with some content
-        VStack(alignment: .leading, spacing: 0) {
-            Text("fn main() -> Result<(), Error> {")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white)
-            Text("    println!(\"Hello, world!\");")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white)
-            Text("    Ok(())")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white)
-            Text("}")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white)
-        }
-        .padding(8)
-        .background(Color(white: 0.15))
-        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 3)
-        .offset(x: 100, y: 50)
-    }
-    .frame(width: 600, height: 400)
-}
-#endif

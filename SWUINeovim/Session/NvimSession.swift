@@ -53,6 +53,8 @@ public struct RawHighlightAttrs: Sendable, Equatable {
     public var strikethrough: Bool
     public var reverse: Bool
     public var blend: Int
+    public var hiName: String?
+    public var uiName: String?
 
     public init(
         foreground: UInt32? = nil,
@@ -67,7 +69,9 @@ public struct RawHighlightAttrs: Sendable, Equatable {
         underdashed: Bool = false,
         strikethrough: Bool = false,
         reverse: Bool = false,
-        blend: Int = 0
+        blend: Int = 0,
+        hiName: String? = nil,
+        uiName: String? = nil
     ) {
         self.foreground = foreground
         self.background = background
@@ -82,10 +86,12 @@ public struct RawHighlightAttrs: Sendable, Equatable {
         self.strikethrough = strikethrough
         self.reverse = reverse
         self.blend = blend
+        self.hiName = hiName
+        self.uiName = uiName
     }
 
     /// Parse highlight attributes from a Neovim `hl_attr_define` map.
-    public static func from(msgpack value: MsgPackValue) -> RawHighlightAttrs {
+    public static func from(msgpack value: MsgPackValue, info: MsgPackValue? = nil) -> RawHighlightAttrs {
         var attrs = RawHighlightAttrs()
         guard case .map(let dict) = value else { return attrs }
 
@@ -120,6 +126,23 @@ public struct RawHighlightAttrs: Sendable, Equatable {
                 attrs.blend = val.intValue.flatMap { Int(exactly: $0) } ?? 0
             default:
                 break
+            }
+        }
+
+        if let info,
+           case .array(let infoArray) = info,
+           let first = infoArray.first,
+           case .map(let infoDict) = first {
+            for (key, val) in infoDict {
+                guard let keyStr = key.stringValue else { continue }
+                switch keyStr {
+                case "hi_name":
+                    attrs.hiName = val.stringValue
+                case "ui_name":
+                    attrs.uiName = val.stringValue
+                default:
+                    break
+                }
             }
         }
 
@@ -1108,6 +1131,8 @@ public final class NvimSession: ObservableObject {
             break
         case "bell", "visual_bell":
             break
+        case "update_menu":
+            break // Neovim requests a menu refresh — no-op for embedded UI
 
         default:
             Self.redrawDebugLog("unknown redraw event: \(name)")
@@ -1216,7 +1241,7 @@ public final class NvimSession: ObservableObject {
               let hlID = args[0].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-        let attrs = RawHighlightAttrs.from(msgpack: args[1])
+        let attrs = RawHighlightAttrs.from(msgpack: args[1], info: args.count > 3 ? args[3] : nil)
         highlightTable[hlID] = attrs
     }
 
@@ -1295,7 +1320,7 @@ public final class NvimSession: ObservableObject {
               let height = args[5].intValue.flatMap({ Int(exactly: $0) })
         else { return }
 
-          Self.resizeDebugLog("event win_pos grid=\(gridID) origin=\(startCol),\(startRow) size=\(width)x\(height)")
+                Self.resizeDebugLog("event win_pos grid=\(gridID) origin=\(startCol),\(startRow) size=\(width)x\(height)")
 
         windowPositions[gridID] = WindowPosition(
             gridID: gridID,
