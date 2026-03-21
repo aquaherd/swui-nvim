@@ -1,4 +1,5 @@
 import SwiftUI
+import MsgPack
 import SWUINeovim
 import Transport
 #if os(macOS)
@@ -11,6 +12,10 @@ struct SWUINeovimMacApp: App {
         UserDefaults.standard.register(defaults: [
             "swuineovim.nvimPath": Self.resolvedNvimPath()
         ])
+
+#if os(macOS)
+    NSWindow.allowsAutomaticWindowTabbing = false
+#endif
     }
 
     /// Returns the first nvim binary found in the well-known install locations
@@ -110,7 +115,7 @@ private struct SWUINeovimMacCommands: Commands {
 }
 
 private struct SWUINeovimMacRootView: View {
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\..colorScheme) private var colorScheme
     let initialLaunch: SSHWindowLaunch?
 
     @State private var controller = MacSessionController()
@@ -131,80 +136,105 @@ private struct SWUINeovimMacRootView: View {
         let cellSize = computeCellSize(fontName: editorFontName, fontSize: CGFloat(editorFontSize))
         let flushRevision = controller.flushRevision
         let gridSnapshot = controller.gridSnapshot
+        let tabline = controller.session.tabline
 
-        ZStack(alignment: .topLeading) {
-            // Layer 1: Editor surface
-            EditorGridViewRepresentable(
-                controller: controller,
-                snapshot: gridSnapshot,
-                fontName: editorFontName,
-                fontSize: editorFontSize,
-                metalEnabled: metalEnabled
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .zIndex(0)
-
-            if !gridSnapshot.layers.isEmpty {
-                MultigridOverlayView(
-                    snapshot: gridSnapshot,
-                    cellSize: cellSize,
-                    fontName: editorFontName,
-                    fontSize: editorFontSize
-                )
-                .zIndex(1)
-            }
-
-            // Layer 2: Popup menu overlay
-            if controller.session.popupMenu.isVisible {
-                PopupMenuOverlayView(
-                    state: controller.session.popupMenu,
-                    cellSize: cellSize,
-                    defaultFG: controller.session.defaultColors.foreground,
-                    defaultBG: controller.session.defaultColors.background,
-                    gridOrigins: gridSnapshot.gridOrigins,
-                    preferBottomAnchor: controller.session.cmdline.isVisible,
-                    onSelect: { index in
-                        let delta = index - controller.session.popupMenu.selectedIndex
-                        if delta > 0 {
-                            for _ in 0..<delta {
-                                controller.sendInput("<C-n>")
-                            }
-                        } else if delta < 0 {
-                            for _ in 0..<(-delta) {
-                                controller.sendInput("<C-p>")
-                            }
+        VStack(spacing: 0) {
+            if tabline.tabs.count > 1 {
+                NvimTabBarView(
+                    tabs: tabline.tabs,
+                    currentTabHandle: tabline.currentTabHandle,
+                    onSelect: { handle in
+                        Task {
+                            try? await controller.session.selectTab(handle: handle)
                         }
-                        controller.sendInput("<CR>")
+                    },
+                    onNewTab: {
+                        Task {
+                            try? await controller.session.command("tabnew")
+                        }
+                    },
+                    onCloseCurrentTab: {
+                        Task {
+                            try? await controller.session.command("tabclose")
+                        }
                     }
                 )
-                .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .topLeading)))
-                .animation(.easeOut(duration: 0.12), value: controller.session.popupMenu.isVisible)
-                .zIndex(2)
             }
 
-            // Layer 3: Messages + command line anchored at bottom
-            VStack(spacing: 0) {
-                Spacer()
+            ZStack(alignment: .topLeading) {
+                // Layer 1: Editor surface
+                EditorGridViewRepresentable(
+                    controller: controller,
+                    snapshot: gridSnapshot,
+                    fontName: editorFontName,
+                    fontSize: editorFontSize,
+                    metalEnabled: metalEnabled
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .zIndex(0)
 
-                if !controller.session.messages.isEmpty {
-                    MessageOverlayView(
-                        messages: controller.session.messages,
-                        defaultFG: controller.session.defaultColors.foreground,
-                        defaultBG: controller.session.defaultColors.background
+                if !gridSnapshot.layers.isEmpty {
+                    MultigridOverlayView(
+                        snapshot: gridSnapshot,
+                        cellSize: cellSize,
+                        fontName: editorFontName,
+                        fontSize: editorFontSize
                     )
+                    .zIndex(1)
                 }
 
-                if controller.session.cmdline.isVisible {
-                    CmdlineOverlayView(
-                        state: controller.session.cmdline,
+                // Layer 2: Popup menu overlay
+                if controller.session.popupMenu.isVisible {
+                    PopupMenuOverlayView(
+                        state: controller.session.popupMenu,
+                        cellSize: cellSize,
                         defaultFG: controller.session.defaultColors.foreground,
-                        defaultBG: controller.session.defaultColors.background
+                        defaultBG: controller.session.defaultColors.background,
+                        gridOrigins: gridSnapshot.gridOrigins,
+                        preferBottomAnchor: controller.session.cmdline.isVisible,
+                        onSelect: { index in
+                            let delta = index - controller.session.popupMenu.selectedIndex
+                            if delta > 0 {
+                                for _ in 0..<delta {
+                                    controller.sendInput("<C-n>")
+                                }
+                            } else if delta < 0 {
+                                for _ in 0..<(-delta) {
+                                    controller.sendInput("<C-p>")
+                                }
+                            }
+                            controller.sendInput("<CR>")
+                        }
                     )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.15), value: controller.session.cmdline.isVisible)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .topLeading)))
+                    .animation(.easeOut(duration: 0.12), value: controller.session.popupMenu.isVisible)
+                    .zIndex(2)
                 }
+
+                // Layer 3: Messages + command line anchored at bottom
+                VStack(spacing: 0) {
+                    Spacer()
+
+                    if !controller.session.messages.isEmpty {
+                        MessageOverlayView(
+                            messages: controller.session.messages,
+                            defaultFG: controller.session.defaultColors.foreground,
+                            defaultBG: controller.session.defaultColors.background
+                        )
+                    }
+
+                    if controller.session.cmdline.isVisible {
+                        CmdlineOverlayView(
+                            state: controller.session.cmdline,
+                            defaultFG: controller.session.defaultColors.foreground,
+                            defaultBG: controller.session.defaultColors.background
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.15), value: controller.session.cmdline.isVisible)
+                    }
+                }
+                .zIndex(3)
             }
-            .zIndex(3)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -232,7 +262,6 @@ private struct SWUINeovimMacRootView: View {
 
                 if !didInitializeSession {
                     didInitializeSession = true
-
                     switch initialLaunch?.mode {
                     case .connectSheet:
                         showSSHConnect = true
@@ -321,6 +350,128 @@ private struct SWUINeovimMacRootView: View {
 }
 
 #if os(macOS)
+private struct NvimTabBarView: View {
+    let tabs: [TabInfo]
+    let currentTabHandle: MsgPackValue
+    let onSelect: (MsgPackValue) -> Void
+    let onNewTab: () -> Void
+    let onCloseCurrentTab: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Scrollable tab pills
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(Array(tabs.enumerated()), id: \.element.handle) { index, tab in
+                        NvimTabPillView(
+                            label: tabLabel(tab, index: index),
+                            isSelected: tab.handle == currentTabHandle,
+                            onSelect: { onSelect(tab.handle) },
+                            onClose: tab.handle == currentTabHandle ? onCloseCurrentTab : nil
+                        )
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+            }
+
+            Divider()
+                .frame(height: 16)
+                .padding(.horizontal, 4)
+
+            // New-tab button
+            Button(action: onNewTab) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("New Tab")
+            .padding(.trailing, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func tabLabel(_ tab: TabInfo, index: Int) -> String {
+        guard !tab.name.isEmpty else { return "[No Name]" }
+        let basename = URL(fileURLWithPath: tab.name).lastPathComponent
+        return basename.isEmpty ? tab.name : basename
+    }
+}
+
+private struct NvimTabPillView: View {
+    let label: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: (() -> Void)?
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 5) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+
+                Text(label)
+                    .lineLimit(1)
+                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+
+                // Close button — shown on active tab always, or on any tab while hovered
+                if onClose != nil || isHovered {
+                    Button {
+                        onClose?()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .medium))
+                            .frame(width: 14, height: 14)
+                            .background(
+                                Circle().fill(isSelected
+                                    ? Color.primary.opacity(0.15)
+                                    : Color.clear
+                                )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(isSelected ? Color.primary.opacity(0.7) : Color.secondary)
+                    .opacity((onClose != nil || isHovered) ? 1 : 0)
+                    .help("Close Tab")
+                } else {
+                    // Placeholder to keep pill width stable
+                    Color.clear.frame(width: 14, height: 14)
+                }
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 6)
+            .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isSelected
+                    ? Color.primary.opacity(0.10)
+                    : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    isSelected ? Color.primary.opacity(0.18) : Color.clear,
+                    lineWidth: 0.5
+                )
+        )
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.1), value: isHovered)
+        .animation(.easeOut(duration: 0.1), value: isSelected)
+    }
+}
+
 private struct WindowAccessor: NSViewRepresentable {
     let onResolve: (NSWindow?) -> Void
 
@@ -334,6 +485,7 @@ private struct WindowAccessor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
+            nsView.window?.tabbingMode = .disallowed
             onResolve(nsView.window)
         }
     }

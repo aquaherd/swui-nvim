@@ -269,6 +269,28 @@ public struct MessageEntry: Sendable, Equatable, Identifiable {
     }
 }
 
+// MARK: - Tabline State
+
+/// State of Neovim's external tabline.
+public struct TablineState: Sendable, Equatable {
+    public var tabs: [TabInfo]
+    public var currentTabHandle: MsgPackValue
+    public var bufs: [BufInfo]
+    public var currentBufHandle: MsgPackValue
+
+    public init(
+        tabs: [TabInfo] = [],
+        currentTabHandle: MsgPackValue = .nil,
+        bufs: [BufInfo] = [],
+        currentBufHandle: MsgPackValue = .nil
+    ) {
+        self.tabs = tabs
+        self.currentTabHandle = currentTabHandle
+        self.bufs = bufs
+        self.currentBufHandle = currentBufHandle
+    }
+}
+
 // MARK: - Grid
 
 /// A 2-D grid of cells, representing one Neovim window or the global grid.
@@ -516,9 +538,11 @@ public final class NvimSession: ObservableObject {
 #if DEBUG
     private static let resizeDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_RESIZE"] == "1"
     private static let mouseDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_MOUSE"] == "1"
+    private static let redrawDebugEnabled = ProcessInfo.processInfo.environment["SWUINVIM_DEBUG_REDRAW"] == "1"
 #else
     private static let resizeDebugEnabled = false
     private static let mouseDebugEnabled = false
+    private static let redrawDebugEnabled = false
 #endif
 
     private static func resizeDebugLog(_ message: @autoclosure () -> String) {
@@ -532,6 +556,13 @@ public final class NvimSession: ObservableObject {
 #if DEBUG
         guard mouseDebugEnabled else { return }
         print("[MouseDebug][NvimSession] \(message())")
+#endif
+    }
+
+    private static func redrawDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+        guard redrawDebugEnabled else { return }
+        print("[RedrawDebug][NvimSession] \(message())")
 #endif
     }
 
@@ -551,7 +582,9 @@ public final class NvimSession: ObservableObject {
     @Published public private(set) var messageHistory: [MessageEntry] = []
     @Published public private(set) var tooltip = TooltipState()
     @Published public private(set) var windowPositions: [Int: WindowPosition] = [:]
+    @Published public private(set) var tabline = TablineState()
     @Published public private(set) var title: String = ""
+    @Published public private(set) var cwd: String = ""
     @Published public private(set) var isBusy: Bool = false
 
     /// Whether the UI should attach with Neovim's multigrid extension.
@@ -732,6 +765,11 @@ public final class NvimSession: ObservableObject {
         _ = try await rpcRequest(method: "nvim_command", params: [.string(cmd)])
     }
 
+    /// Select a tab by passing its opaque tabpage handle directly to Neovim.
+    public func selectTab(handle: MsgPackValue) async throws {
+        _ = try await rpcRequest(method: "nvim_set_current_tabpage", params: [handle])
+    }
+
     private func dismissVisibleMessagesForUserInput(keys: String) {
         guard !messages.isEmpty else { return }
         guard keys != ":" else { return }
@@ -756,6 +794,7 @@ public final class NvimSession: ObservableObject {
         let uiOptions: MsgPackValue = .map([
             .string("ext_linegrid"):  .bool(true),
             .string("ext_multigrid"): .bool(usesMultigrid),
+            .string("ext_tabline"):   .bool(true),
             .string("ext_popupmenu"): .bool(true),
             .string("ext_cmdline"):   .bool(true),
             .string("ext_messages"):  .bool(true),
@@ -932,7 +971,7 @@ public final class NvimSession: ObservableObject {
             await handleNotification(method: method, params: params)
 
         default:
-            break
+            Self.redrawDebugLog("unknown RPC message type: \(typeInt)")
         }
     }
 
@@ -947,8 +986,7 @@ public final class NvimSession: ObservableObject {
         case "redraw":
             processRedrawBatch(params)
         default:
-            // Unknown notification — ignore
-            break
+            Self.redrawDebugLog("unknown notification: \(method)")
         }
     }
 
@@ -1006,6 +1044,8 @@ public final class NvimSession: ObservableObject {
             handleWinHide(args)
         case "win_close":
             handleWinClose(args)
+        case "win_viewport", "win_viewport_margins":
+            break // Viewport geometry — informational, no rendering action needed
 
         // --- Popup menu ---
         case "popupmenu_show":
@@ -1041,10 +1081,18 @@ public final class NvimSession: ObservableObject {
         case "msg_history_show":
             handleMsgHistoryShow(args)
 
+        // --- Tabline ---
+        case "tabline_update":
+            handleTablineUpdate(args)
+
         // --- Misc ---
         case "set_title":
             if let t = args.first?.stringValue {
                 title = t
+            }
+        case "chdir":
+            if let path = args.first?.stringValue {
+                cwd = path
             }
         case "busy_start":
             isBusy = true
@@ -1062,9 +1110,40 @@ public final class NvimSession: ObservableObject {
             break
 
         default:
-            // Unknown event — skip
-            break
+            Self.redrawDebugLog("unknown redraw event: \(name)")
         }
+    }
+
+    private func handleTablineUpdate(_ args: [MsgPackValue]) {
+        guard args.count >= 4,
+              case .array(let tabsArray) = args[1],
+              case .array(let bufsArray) = args[3]
+        else { return }
+
+        let currentTab = args[0]  // raw ext type — tabpage handle
+        let currentBuf = args[2]  // raw ext type — buffer handle
+
+        let tabs = tabsArray.compactMap { tab -> TabInfo? in
+            guard case .map(let dict) = tab else { return nil }
+            // "tab" key holds the raw tabpage ext handle
+            let handle = dict[.string("tab")] ?? dict[.string("handle")] ?? .nil
+            let name = dict[.string("name")]?.stringValue ?? ""
+            return TabInfo(handle: handle, name: name)
+        }
+
+        let bufs = bufsArray.compactMap { buf -> BufInfo? in
+            guard case .map(let dict) = buf else { return nil }
+            let handle = dict[.string("buffer")] ?? dict[.string("handle")] ?? .nil
+            let name = dict[.string("name")]?.stringValue ?? ""
+            return BufInfo(handle: handle, name: name)
+        }
+
+        tabline = TablineState(
+            tabs: tabs,
+            currentTabHandle: currentTab,
+            bufs: bufs,
+            currentBufHandle: currentBuf
+        )
     }
 
     // MARK: - Grid Event Handlers

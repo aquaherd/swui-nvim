@@ -117,7 +117,7 @@ public enum RedrawEvent: Sendable, Equatable {
     case msgHistory(entries: [HistoryEntry])
 
     // MARK: ext_tabline Events
-    case tablineUpdate(currentTab: Int, tabs: [TabInfo], currentBuf: Int, bufs: [BufInfo])
+    case tablineUpdate(currentTab: MsgPackValue, tabs: [TabInfo], currentBuf: MsgPackValue, bufs: [BufInfo])
 
     // MARK: Mouse Events
     case mouseOn
@@ -328,11 +328,13 @@ public struct HistoryEntry: Sendable, Equatable {
 }
 
 /// Tab page info from `tabline_update`.
+/// The `handle` is the raw MsgPackValue (an ext type on real Neovim connections)
+/// so it can be round-tripped back to `nvim_set_current_tabpage`.
 public struct TabInfo: Sendable, Equatable {
-    public let handle: Int
+    public let handle: MsgPackValue
     public let name: String
 
-    public init(handle: Int, name: String) {
+    public init(handle: MsgPackValue, name: String) {
         self.handle = handle
         self.name = name
     }
@@ -340,10 +342,10 @@ public struct TabInfo: Sendable, Equatable {
 
 /// Buffer info from `tabline_update`.
 public struct BufInfo: Sendable, Equatable {
-    public let handle: Int
+    public let handle: MsgPackValue
     public let name: String
 
-    public init(handle: Int, name: String) {
+    public init(handle: MsgPackValue, name: String) {
         self.handle = handle
         self.name = name
     }
@@ -1036,33 +1038,30 @@ extension RedrawBatch {
 
     private static func parseTablineUpdate(_ args: [MsgPackValue]) -> RedrawEvent? {
         guard args.count >= 4,
-              let currentTab = args[0].intValue,
               case .array(let tabsArray) = args[1],
-              let currentBuf = args[2].intValue,
               case .array(let bufsArray) = args[3]
         else { return nil }
 
+        let currentTab = args[0]  // raw tabpage ext handle
+        let currentBuf = args[2]  // raw buffer ext handle
+
         let tabs = tabsArray.compactMap { tab -> TabInfo? in
             guard case .map(let dict) = tab else { return nil }
-            let handle = dict[.string("tab")]?.intValue.map { Int($0) }
-                      ?? dict[.string("handle")]?.intValue.map { Int($0) }
-                      ?? 0
+            let handle = dict[.string("tab")] ?? dict[.string("handle")] ?? .nil
             let name = dict[.string("name")]?.stringValue ?? ""
             return TabInfo(handle: handle, name: name)
         }
 
         let bufs = bufsArray.compactMap { buf -> BufInfo? in
             guard case .map(let dict) = buf else { return nil }
-            let handle = dict[.string("buffer")]?.intValue.map { Int($0) }
-                      ?? dict[.string("handle")]?.intValue.map { Int($0) }
-                      ?? 0
+            let handle = dict[.string("buffer")] ?? dict[.string("handle")] ?? .nil
             let name = dict[.string("name")]?.stringValue ?? ""
             return BufInfo(handle: handle, name: name)
         }
 
         return .tablineUpdate(
-            currentTab: Int(currentTab), tabs: tabs,
-            currentBuf: Int(currentBuf), bufs: bufs
+            currentTab: currentTab, tabs: tabs,
+            currentBuf: currentBuf, bufs: bufs
         )
     }
 }

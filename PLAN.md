@@ -300,6 +300,7 @@ Display
 - [x] `ext_messages` → `MessageOverlay` (notification banners).
 - [x] Floating windows (`win_float_pos`) → overlay positioned cards.
 - [x] Tooltip / hover overlay for LSP hover info.
+- [x] `ext_tabline` → `NvimTabBarView` in-app SwiftUI pill tab strip. Neovim tabpage handles are msgpack ext types (type 2) and are stored as opaque `MsgPackValue`; switching calls `nvim_set_current_tabpage`. Native macOS titlebar tabbing disabled (`NSWindow.allowsAutomaticWindowTabbing = false`) to prevent spurious extra sessions.
 
 ### Phase 4 — SSH Transport (Week 10–12)
 
@@ -367,6 +368,7 @@ let uiOptions: [String: NvimValue] = [
     "ext_cmdline":    .bool(true),   // UI renders command line
     "ext_messages":   .bool(true),   // UI renders messages
     "ext_hlstate":    .bool(true),   // semantic highlight info
+    "ext_tabline":    .bool(true),   // UI renders tab bar (suppresses grid tabline)
     "rgb":            .bool(true),   // 24-bit color
 ]
 ```
@@ -387,6 +389,7 @@ Key redraw events to handle:
 | `popupmenu_show/hide/select` | Completion popup |
 | `cmdline_show/hide/pos` | Command line |
 | `msg_show/clear` | Messages |
+| `tabline_update` | Tab bar state — current tabpage (ext type), tab list, current buffer (ext type), buffer list |
 | `flush` | End of redraw batch — commit to screen |
 
 ---
@@ -450,7 +453,7 @@ Swift Concurrency's `AsyncStream` and `Task` model.
 
 ## 13. Future Work (Post-1.0)
 
-- **Tabs**: native macOS tab bar mapped to Neovim tabpages.
+- [x] **Tabs**: in-app SwiftUI tab strip (`NvimTabBarView`) mirrors Neovim tabpages via `ext_tabline` / `tabline_update`. Tab handles are opaque msgpack ext values round-tripped to `nvim_set_current_tabpage`. Native macOS titlebar tabs disabled.
 - **File browser sidebar**: `nvim_exec_lua` to enumerate files, SwiftUI sidebar.
 - **Inline images**: Neovim image protocol support (sixel / kitty graphics).
 - **Terminal grid**: embedded `:terminal` rendering with proper ANSI color.
