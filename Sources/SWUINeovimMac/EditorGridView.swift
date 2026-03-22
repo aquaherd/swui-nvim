@@ -113,6 +113,7 @@ final class EditorGridNSView: NSView {
 
     private var metalAtlas: MetalGlyphAtlas?
     private var metalLayer: CAMetalLayer?
+    private var cursorOverlayLayer: CALayer?
     private var metalBenchmark = RenderBenchmark()
     private var coreTextBenchmark = RenderBenchmark()
     private var useMetalRenderer = false
@@ -186,6 +187,12 @@ final class EditorGridNSView: NSView {
         self.wantsLayer = true
         self.layer?.addSublayer(layer)
         self.metalLayer = layer
+
+        let cursor = CALayer()
+        cursor.zPosition = 1
+        cursor.isHidden = true
+        self.layer?.addSublayer(cursor)
+        self.cursorOverlayLayer = cursor
     }
 
     func setEditorFont(name: String, size: CGFloat) {
@@ -289,14 +296,11 @@ final class EditorGridNSView: NSView {
         if useMetalForFrame, let atlas = metalAtlas, let layer = metalLayer {
             drawWithMetal(atlas: atlas, layer: layer, cellSize: cellSize)
             useMetalRenderer = true
-
-            // Draw cursor via CoreText on top of the Metal layer.
-            if let cg = NSGraphicsContext.current?.cgContext {
-                drawMultigridCursor(in: cg, cellSize: cellSize)
-            }
+            updateCursorOverlayLayer(cellSize: cellSize)
         } else {
             // Hide metal layer when using CoreText
             metalLayer?.isHidden = true
+            cursorOverlayLayer?.isHidden = true
             useMetalRenderer = false
             drawWithCoreText(dirtyRect: dirtyRect, cellSize: cellSize)
         }
@@ -695,6 +699,55 @@ final class EditorGridNSView: NSView {
             cg.setFillColor(nsColor(rgb: 0x7AA2F7).withAlphaComponent(0.45).cgColor)
             cg.fill(rect)
         }
+    }
+
+    /// Positions the CALayer cursor overlay used in the Metal rendering path.
+    private func updateCursorOverlayLayer(cellSize: CGSize) {
+        guard let cursorLayer = cursorOverlayLayer else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        if shouldBlinkCursor && !cursorBlinkVisible {
+            cursorLayer.isHidden = true
+            return
+        }
+
+        let cursorOrigin: CGPoint
+        if snapshot.drawBaseCursor {
+            cursorOrigin = .zero
+        } else if let layer = snapshot.layers.first(where: { $0.id == snapshot.cursorGridID && !$0.isFloating }) {
+            cursorOrigin = CGPoint(
+                x: CGFloat(layer.originCol) * cellSize.width,
+                y: CGFloat(layer.originRow) * cellSize.height
+            )
+        } else {
+            cursorLayer.isHidden = true
+            return
+        }
+
+        let cursorColor = nsColor(rgb: 0x7AA2F7)
+
+        if snapshot.useIBeamCursor {
+            let beamWidth: CGFloat = 2.0
+            cursorLayer.frame = CGRect(
+                x: cursorOrigin.x + CGFloat(snapshot.cursorCol) * cellSize.width + 1,
+                y: cursorOrigin.y + CGFloat(snapshot.cursorRow) * cellSize.height + 1,
+                width: beamWidth,
+                height: max(1, cellSize.height - 2)
+            )
+            cursorLayer.backgroundColor = cursorColor.cgColor
+        } else {
+            cursorLayer.frame = CGRect(
+                x: cursorOrigin.x + CGFloat(snapshot.cursorCol) * cellSize.width,
+                y: cursorOrigin.y + CGFloat(snapshot.cursorRow) * cellSize.height,
+                width: cellSize.width,
+                height: cellSize.height
+            )
+            cursorLayer.backgroundColor = cursorColor.withAlphaComponent(0.45).cgColor
+        }
+        cursorLayer.isHidden = false
     }
 
     private func measureCell() -> CGSize {
