@@ -80,6 +80,7 @@ final class EditorGridNSView: NSView {
         highlights: [:]
     )
     private var lastReportedCellSize: (cols: Int, rows: Int)?
+    private var pendingResize: Task<Void, Never>?
 
     private var font: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
     private var renderFont: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
@@ -224,7 +225,7 @@ final class EditorGridNSView: NSView {
 
     override func layout() {
         super.layout()
-        metalLayer?.frame = bounds
+        needsDisplay = true
         emitResizeIfNeeded()
     }
 
@@ -431,16 +432,20 @@ final class EditorGridNSView: NSView {
     private func drawWithMetal(atlas: MetalGlyphAtlas, layer: CAMetalLayer, cellSize: CGSize) {
         let startTime = CACurrentMediaTime()
 
-        // Update layer size to match view
+        // Update layer size to match view — disable CA implicit animations
+        // so the frame change is instantaneous (no stretching during resize).
         let scale = window?.backingScaleFactor ?? 2.0
         let drawableSize = CGSize(
             width: bounds.width * scale,
             height: bounds.height * scale
         )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer.frame = bounds
         layer.drawableSize = drawableSize
         layer.contentsScale = scale
         layer.isHidden = false
+        CATransaction.commit()
 
         // Update atlas cell metrics
         atlas.measureCellSize(font: font as CTFont)
@@ -784,10 +789,16 @@ final class EditorGridNSView: NSView {
         let previous = lastReportedCellSize.map { "\($0.cols)x\($0.rows)" } ?? "nil"
         let cellWidth = String(format: "%.2f", cell.width)
         let cellHeight = String(format: "%.2f", cell.height)
-        Self.resizeDebugLog("[NSView] bounds=\(Int(bounds.width))x\(Int(bounds.height)) cell=\(cellWidth)x\(cellHeight) reported=\(cols)x\(rows) previous=\(previous)")
+        Self.resizeDebugLog("[NSView] bounds=\(Int(bounds.width))x\(Int(bounds.height)) cell=\(cellWidth)x\(cellHeight) pending=\(cols)x\(rows) previous=\(previous)")
 
         lastReportedCellSize = (cols, rows)
-        requestResize?(cols, rows)
+
+        pendingResize?.cancel()
+        pendingResize = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            self?.requestResize?(cols, rows)
+        }
     }
 
     private func sendMouseEvent(button: String, action: String, event: NSEvent) {
